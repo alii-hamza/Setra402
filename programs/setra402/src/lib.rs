@@ -5,10 +5,8 @@ pub mod errors;
 pub mod instructions;
 pub mod state;
 
-pub use constants::*;
-pub use errors::*;
-pub use instructions::*;
-pub use state::*;
+// Re-export all instruction accounts AND their generated __client_accounts modules to crate root
+pub use use instructions::{CancelTask, InitializeTask, RefundTask, SettleTask, SettleTaskPrivate};
 
 declare_id!("7dDxB8tm3RgFtJ1UDugM6B5qUa1xitAXdNo7ciuKhYZS");
 
@@ -39,5 +37,9 @@ pub mod setra402 {
 
     pub fn refund_task(ctx: Context<RefundTask>) -> Result<()> {
         instructions::refund_task::handler(ctx)
+    }
+
+    pub fn cancel_task(ctx: Context<CancelTask>) -> Result<()> {
+        instructions::cancel_task::handler(ctx)
     }
 }

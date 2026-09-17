@@ -6,7 +6,7 @@ pub enum SetraError {
     InvalidAmount,
     #[msg("Timeout must be greater than zero")]
     InvalidTimeout,
-    #[msg("Deadline calculation overflowed")]
+    #[msg("Calculation overflowed")]
     Overflow,
     #[msg("Task is not in Pending status")]
     TaskNotPending,
