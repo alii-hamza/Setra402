@@ -5,8 +5,7 @@ pub mod errors;
 pub mod instructions;
 pub mod state;
 
-// Re-export all instruction accounts AND their generated __client_accounts modules to crate root
-pub use use instructions::{CancelTask, InitializeTask, RefundTask, SettleTask, SettleTaskPrivate};
+pub use instructions::*;
 
 declare_id!("7dDxB8tm3RgFtJ1UDugM6B5qUa1xitAXdNo7ciuKhYZS");
 

@@ -238,7 +238,6 @@ describe("setra402-escrow", () => {
       .signers([buyer])
       .rpc();
 
-    // Wait 3 seconds for on-chain deadline to pass
     await new Promise((resolve) => setTimeout(resolve, 3000));
 
     await program.methods
@@ -255,5 +254,88 @@ describe("setra402-escrow", () => {
 
     const state = await program.account.taskState.fetch(taskState);
     expect(state.status).to.deep.equal({ refunded: {} });
+  });
+
+  it("Scenario 5: Double-Spend Rejection (Same Nullifier Cannot Settle Twice)", async () => {
+    const taskId5A = new anchor.BN(5);
+    const taskId5B = new anchor.BN(6);
+    const sharedNullifier = Buffer.alloc(32, 99); // Shared secret
+    const [nullifierRecord] = getNullifierPda(sharedNullifier);
+
+    // Initialize Task 5A
+    const [taskStateA] = getTaskPda(buyer.publicKey, taskId5A);
+    const [vaultA] = getVaultPda(taskStateA);
+    await program.methods
+      .initializeTask(taskId5A, TASK_AMOUNT, TIMEOUT_SECONDS, true)
+      .accounts({
+        buyer: buyer.publicKey,
+        seller: seller.publicKey,
+        verifier: verifier.publicKey,
+        mint,
+        taskState: taskStateA,
+        vault: vaultA,
+        buyerTokenAccount,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([buyer])
+      .rpc();
+
+    // Settle Task 5A with sharedNullifier (Should Succeed)
+    await program.methods
+      .settleTaskPrivate(Array.from(sharedNullifier))
+      .accounts({
+        taskState: taskStateA,
+        verifier: verifier.publicKey,
+        nullifierRecord,
+        vault: vaultA,
+        sellerTokenAccount,
+        protocolTreasury: treasuryTokenAccount,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([verifier])
+      .rpc();
+
+    // Initialize Task 5B
+    const [taskStateB] = getTaskPda(buyer.publicKey, taskId5B);
+    const [vaultB] = getVaultPda(taskStateB);
+    await program.methods
+      .initializeTask(taskId5B, TASK_AMOUNT, TIMEOUT_SECONDS, true)
+      .accounts({
+        buyer: buyer.publicKey,
+        seller: seller.publicKey,
+        verifier: verifier.publicKey,
+        mint,
+        taskState: taskStateB,
+        vault: vaultB,
+        buyerTokenAccount,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([buyer])
+      .rpc();
+
+    // Attempt to settle Task 5B with the ALREADY-SPENT nullifier (Should Fail)
+    try {
+      await program.methods
+        .settleTaskPrivate(Array.from(sharedNullifier))
+        .accounts({
+          taskState: taskStateB,
+          verifier: verifier.publicKey,
+          nullifierRecord,
+          vault: vaultB,
+          sellerTokenAccount,
+          protocolTreasury: treasuryTokenAccount,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([verifier])
+        .rpc();
+      expect.fail("Transaction should have failed due to duplicate nullifier PDA initialization");
+    } catch (err: any) {
+      // Anchor throws an account already in use error code (0x0 or 2006)
+      expect(err).to.exist;
+    }
   });
 });

@@ -48,6 +48,10 @@ pub fn handler(ctx: Context<SettleTaskPrivate>, nullifier: [u8; 32]) -> Result<(
     let task_state = &mut ctx.accounts.task_state;
     require!(task_state.status == TaskStatus::Pending, SetraError::TaskNotPending);
 
+    // Verify clock expiry has not passed
+    let clock = Clock::get()?;
+    require!(clock.unix_timestamp <= task_state.deadline_unix, SetraError::TaskExpired);
+
     let amount = task_state.amount;
     let fee = (amount as u128)
         .checked_mul(PROTOCOL_FEE_BPS as u128)
@@ -67,7 +71,7 @@ pub fn handler(ctx: Context<SettleTaskPrivate>, nullifier: [u8; 32]) -> Result<(
         &bump,
     ]];
 
-    // 99% to Seller
+    // 99% payout to Seller
     let cpi_to_seller = Transfer {
         from: ctx.accounts.vault.to_account_info(),
         to: ctx.accounts.seller_token_account.to_account_info(),
@@ -80,7 +84,7 @@ pub fn handler(ctx: Context<SettleTaskPrivate>, nullifier: [u8; 32]) -> Result<(
     );
     token::transfer(cpi_ctx_seller, seller_amount)?;
 
-    // 1% to Protocol Treasury
+    // 1% Protocol Fee to Treasury
     if fee > 0 {
         let cpi_to_treasury = Transfer {
             from: ctx.accounts.vault.to_account_info(),
@@ -95,11 +99,11 @@ pub fn handler(ctx: Context<SettleTaskPrivate>, nullifier: [u8; 32]) -> Result<(
         token::transfer(cpi_ctx_treasury, fee)?;
     }
 
-    // Record Nullifier
+    // Persist nullifier commitment
     let nullifier_record = &mut ctx.accounts.nullifier_record;
     nullifier_record.nullifier = nullifier;
     nullifier_record.task_id = task_state.task_id;
-    nullifier_record.settled_at = Clock::get()?.unix_timestamp;
+    nullifier_record.settled_at = clock.unix_timestamp;
     nullifier_record.bump = ctx.bumps.nullifier_record;
 
     task_state.status = TaskStatus::Settled;
