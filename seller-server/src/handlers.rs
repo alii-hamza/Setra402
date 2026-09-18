@@ -5,7 +5,7 @@
 //! handler checks that directly instead of trusting anything the client
 //! claims.
 
-use crate::config::{AppState, PaymentQuote, TaskRequest, TaskResult};
+use crate::config::{AppState, PaymentQuote, TaskRequest, TaskResult, PROTOCOL_FEE_BPS};
 use crate::execute::execute_task;
 use crate::pda::{task_state_pda, vault_pda};
 use crate::task_state::{TaskState, TaskStatus};
@@ -29,7 +29,7 @@ fn internal_error(msg: &str) -> ApiError {
     )
 }
 
-fn payment_required(state: &AppState, task_id: u64, task_state_addr: &Pubkey) -> ApiError {
+fn payment_required(state: &AppState, task_id: u64, task_state_addr: &Pubkey, is_private: bool) -> ApiError {
     let (vault, _bump) = vault_pda(&state.program_id, task_state_addr);
     let quote = PaymentQuote {
         task_id,
@@ -41,6 +41,8 @@ fn payment_required(state: &AppState, task_id: u64, task_state_addr: &Pubkey) ->
         verifier: state.verifier.to_string(),
         amount: state.price,
         timeout_seconds: state.timeout_seconds,
+        is_private,
+        protocol_fee_bps: PROTOCOL_FEE_BPS,
     };
     (
         StatusCode::PAYMENT_REQUIRED,
@@ -65,10 +67,18 @@ pub async fn handle_task(
         .map_err(|e| internal_error(&format!("RPC error: {e}")))?;
 
     let task_state = match account_data {
-        None => return Err(payment_required(&state, task_id, &task_state_addr)),
+        None => return Err(payment_required(&state, task_id, &task_state_addr, req.is_private)),
         Some(data) => TaskState::try_from_account_data(&data)
             .map_err(|e| internal_error(&format!("corrupt task account: {e}")))?,
     };
+
+    // Validate that requested privacy matches on-chain state
+    if req.is_private != task_state.is_private {
+        return Err(bad_request(&format!(
+            "privacy mismatch: request is_private={}, on-chain is_private={}",
+            req.is_private, task_state.is_private
+        )));
+    }
 
     if task_state.status != TaskStatus::Pending {
         return Err((
@@ -81,7 +91,7 @@ pub async fn handle_task(
     }
 
     if task_state.amount < state.price || task_state.mint != state.mint {
-        return Err(payment_required(&state, task_id, &task_state_addr));
+        return Err(payment_required(&state, task_id, &task_state_addr, task_state.is_private));
     }
 
     let output_hash = execute_task(&req.input);

@@ -13,6 +13,7 @@ use solana_pubkey::Pubkey;
 
 pub const TASK_SEED: &[u8] = b"task";
 pub const VAULT_SEED: &[u8] = b"vault";
+pub const NULLIFIER_SEED: &[u8] = b"nullifier";
 
 /// Anchor prefixes every account with an 8-byte discriminator (a hash of
 /// "account:TaskState") before the struct's own fields. We only need its
@@ -38,6 +39,7 @@ pub struct TaskState {
     pub amount: u64,
     pub deadline_unix: i64,
     pub status: TaskStatus,
+    pub is_private: bool,
     pub bump: u8,
 }
 
@@ -67,6 +69,7 @@ impl TaskState {
             + 8  // amount
             + 8  // deadline_unix
             + 1  // status
+            + 1  // is_private
             + 1; // bump
         if body.len() < FIXED_LEN {
             return Err(DecodeError::TooShort);
@@ -102,6 +105,8 @@ impl TaskState {
             other => return Err(DecodeError::UnknownStatus(other)),
         };
         offset += 1;
+        let is_private = body[offset] != 0;
+        offset += 1;
         let bump = body[offset];
 
         Ok(TaskState {
@@ -113,6 +118,7 @@ impl TaskState {
             amount,
             deadline_unix,
             status,
+            is_private,
             bump,
         })
     }
@@ -138,6 +144,7 @@ mod tests {
             TaskStatus::Settled => 1,
             TaskStatus::Refunded => 2,
         });
+        bytes.push(state.is_private as u8);
         bytes.push(state.bump);
         bytes
     }
@@ -152,6 +159,7 @@ mod tests {
             amount: 1_500_000,
             deadline_unix: 1_800_000_000,
             status: TaskStatus::Pending,
+            is_private: false,
             bump: 253,
         }
     }
@@ -199,5 +207,19 @@ mod tests {
             TaskState::try_from_account_data(&bytes),
             Err(DecodeError::UnknownStatus(99))
         );
+    }
+
+    #[test]
+    fn decodes_is_private_field() {
+        let mut state = sample();
+        state.is_private = true;
+        let bytes = encode_for_test(&state);
+        let decoded = TaskState::try_from_account_data(&bytes).unwrap();
+        assert_eq!(decoded.is_private, true);
+
+        state.is_private = false;
+        let bytes = encode_for_test(&state);
+        let decoded = TaskState::try_from_account_data(&bytes).unwrap();
+        assert_eq!(decoded.is_private, false);
     }
 }

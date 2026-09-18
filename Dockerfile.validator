@@ -1,0 +1,31 @@
+# Minimal Solana Validator Dockerfile
+# Based on TaskAnchor Architecture Plan Section 3.1
+
+FROM ubuntu:22.04
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Solana CLI (Agave)
+RUN sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)" && \
+    export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH" && \
+    solana --version
+
+# Set environment variables
+ENV PATH="/root/.local/share/solana/install/active_release/bin:${PATH}"
+
+# Expose Solana ports
+# 8899: RPC endpoint
+# 8900: WebSocket endpoint (for account subscriptions)
+EXPOSE 8899 8900
+
+# Run solana-test-validator with reset on each start
+# --quiet: Reduce log noise
+# --reset: Reset ledger on startup
+CMD ["solana-test-validator", "--reset", "--quiet"]

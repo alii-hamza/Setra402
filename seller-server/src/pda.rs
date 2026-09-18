@@ -3,7 +3,7 @@
 //! address is re-derived here from `(program_id, buyer, task_id)`, never
 //! read off an incoming request.
 
-use crate::task_state::{TASK_SEED, VAULT_SEED};
+use crate::task_state::{TASK_SEED, VAULT_SEED, NULLIFIER_SEED};
 use solana_pubkey::Pubkey;
 
 pub fn task_state_pda(program_id: &Pubkey, buyer: &Pubkey, task_id: u64) -> (Pubkey, u8) {
@@ -15,6 +15,10 @@ pub fn task_state_pda(program_id: &Pubkey, buyer: &Pubkey, task_id: u64) -> (Pub
 
 pub fn vault_pda(program_id: &Pubkey, task_state: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[VAULT_SEED, task_state.as_ref()], program_id)
+}
+
+pub fn nullifier_pda(program_id: &Pubkey, nullifier: &[u8; 32]) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[NULLIFIER_SEED, nullifier], program_id)
 }
 
 #[cfg(test)]
@@ -56,5 +60,25 @@ mod tests {
         let (vault_a, _) = vault_pda(&program_id, &task_state_a);
         let (vault_b, _) = vault_pda(&program_id, &task_state_b);
         assert_ne!(vault_a, vault_b);
+    }
+
+    #[test]
+    fn nullifier_pda_depends_on_nullifier_value() {
+        let program_id = Pubkey::new_unique();
+        let nullifier_a = [1u8; 32];
+        let nullifier_b = [2u8; 32];
+        let (pda_a, _) = nullifier_pda(&program_id, &nullifier_a);
+        let (pda_b, _) = nullifier_pda(&program_id, &nullifier_b);
+        assert_ne!(pda_a, pda_b);
+    }
+
+    #[test]
+    fn same_nullifier_always_derives_same_address() {
+        let program_id = Pubkey::new_unique();
+        let nullifier = [42u8; 32];
+        let (a, bump_a) = nullifier_pda(&program_id, &nullifier);
+        let (b, bump_b) = nullifier_pda(&program_id, &nullifier);
+        assert_eq!(a, b);
+        assert_eq!(bump_a, bump_b);
     }
 }
