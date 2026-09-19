@@ -76,7 +76,13 @@ impl RpcClient {
             .await
             .map_err(|e| RpcError::Connect(format!("{}:{}", self.host, self.port), e))?;
         stream.write_all(http_request.as_bytes()).await?;
-        stream.shutdown().await.ok();
+
+        // NOTE: do NOT half-close (shutdown) here. Real Agave validators abort
+        // the request when the client sends FIN before the response is written,
+        // returning an empty body that fails to parse. `Connection: close` in
+        // the request headers already tells the server to close after responding.
+        
+        // stream.shutdown().await.ok();
 
         let mut raw = Vec::new();
         stream.read_to_end(&mut raw).await?;

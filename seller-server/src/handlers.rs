@@ -15,6 +15,7 @@ use axum::Json;
 use serde_json::{json, Value};
 use solana_pubkey::Pubkey;
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 type ApiError = (StatusCode, Json<Value>);
 
@@ -92,6 +93,25 @@ pub async fn handle_task(
 
     if task_state.amount < state.price || task_state.mint != state.mint {
         return Err(payment_required(&state, task_id, &task_state_addr, task_state.is_private));
+    }
+
+    // Mirrors the on-chain refund boundary exactly (`refund_task` succeeds
+    // when clock.unix_timestamp >= deadline_unix): a Pending-but-expired task
+    // must not be executed, or the buyer could walk away with both the
+    // output and a full refund of the escrowed amount.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before 1970")
+        .as_secs() as i64;
+    if now >= task_state.deadline_unix {
+        return Err((
+            StatusCode::GONE,
+            Json(json!({
+                "error": "task deadline has passed; on-chain refund is available",
+                "deadline_unix": task_state.deadline_unix,
+                "now": now,
+            })),
+        ));
     }
 
     let output_hash = execute_task(&req.input);

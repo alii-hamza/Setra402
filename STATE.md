@@ -79,6 +79,14 @@
 - Image size optimized with multi-stage build
 - **Status**: State verified - Docker build successful
 
+### Task 9: Post-Integration Verification & Fixes - ✅ COMPLETED
+- Fixed deadline gap in handlers.rs: expired Pending tasks now rejected with 410 GONE (mirrors on-chain refund boundary `now >= deadline_unix`); prevents buyer receiving output + full refund
+- Fixed rpc.rs: removed premature TCP half-close (`stream.shutdown()`) that real Agave validators treat as an aborted request (empty body → 500 parse error); mocked tests never caught it
+- Added 8 integration tests: PDA cross-check, per-task PDA divergence, underpaid-private quote, inverse privacy mismatch, result isolation + 404, fixed SHA-256 reference vector, expired-410 + future-deadline boundary pair
+- Live-verified 402 flow against real validator (Docker, Agave 4.2.2): unpaid POST → 402 + correct quote/PDAs, private flag honored, GET result → 404
+- Docker env note: Agave 4.x needs `--security-opt seccomp=unconfined` (io_uring) and compose env placeholders must be non-empty pubkeys
+- **Status**: State verified - all fixes tested, live flow green
+
 ## Compilation Baseline
 - `programs/setra402`: Compiled cleanly to `target/deploy/setra402.so`.
 - `shared/task-anchor-types`: Verified with zero errors.
@@ -92,9 +100,9 @@
 ## Integration Summary
 - **Phase**: Seller Server Integration (Role B) - ✅ COMPLETED
 - **Branch**: feature/seller-server-integration
-- **Total Changes**: 8 files modified, 4 new Docker files created
+- **Total Changes**: 9 files modified, 4 new Docker files created
 - **Build Status**: Docker build successful, container tested
-- **Test Status**: ✅ All 26 tests passed (18 unit + 8 integration)
-- **Code Quality**: Zero warnings, zero errors
-- **Docker Status**: Container running successfully on port 3000
+- **Test Status**: ✅ All 34 tests passed (18 unit + 16 integration), verified on host (Rust 1.89) AND in Docker builder stage (Rust 1.75)
+- **Code Quality**: Some Cosmetic Clippy lints (Warnings)
+- **Docker Status**: Container running successfully on port 3000; live 402 flow verified against real validator
 - **Next Steps**: Ready for Role C handover - buyer agent and verifier development

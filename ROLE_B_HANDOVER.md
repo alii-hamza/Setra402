@@ -6,7 +6,7 @@ Role B (Seller Server Engineer) has completed the integration of the seller-serv
 ## What Was Completed
 
 ### Seller Server Integration ✅
-- **Location**: `/home/alihamza/Setra402/seller-server/`
+- **Location**: `/Setra402/seller-server/`
 - **Status**: Fully integrated and tested via Docker
 - **Branch**: `feature/seller-server-integration`
 
@@ -137,7 +137,7 @@ Role B (Seller Server Engineer) has completed the integration of the seller-serv
 - **Full Refund**: 100% after deadline
 
 ## Shared Types
-**Location**: `/home/alihamza/Setra402/shared/task-anchor-types/src/lib.rs`
+**Location**: `Setra402/shared/task-anchor-types/src/lib.rs`
 
 Role C can import these types to ensure consistency:
 - `TaskStatus` enum (Pending, Settled, Refunded)
@@ -163,7 +163,7 @@ docker run -p 3000:3000 \
   seller-server
 
 # Option 2: Docker Compose (includes validator)
-cd /home/alihamza/Setra402
+cd /Setra402
 docker compose -f docker-compose.dev.yml up --build
 ```
 
@@ -215,25 +215,46 @@ docker compose -f docker-compose.dev.yml up --build
 ## Files Reference
 
 ### Seller Server Files
-- `/home/alihamza/Setra402/seller-server/src/handlers.rs` - HTTP endpoints
-- `/home/alihamza/Setra402/seller-server/src/config.rs` - Configuration and types
-- `/home/alihamza/Setra402/seller-server/src/pda.rs` - PDA derivation functions
-- `/home/alihamza/Setra402/seller-server/src/task_state.rs` - On-chain state decoding
-- `/home/alihamza/Setra402/seller-server/src/execute.rs` - Hash computation reference
+- `/Setra402/seller-server/src/handlers.rs` - HTTP endpoints
+- `/Setra402/seller-server/src/config.rs` - Configuration and types
+- `/Setra402/seller-server/src/pda.rs` - PDA derivation functions
+- `/Setra402/seller-server/src/task_state.rs` - On-chain state decoding
+- `/Setra402/seller-server/src/execute.rs` - Hash computation reference
 
 ### On-Chain Files
-- `/home/alihamza/Setra402/programs/setra402/src/lib.rs` - Program entrypoint
-- `/home/alihamza/Setra402/programs/setra402/src/state.rs` - Account structures
-- `/home/alihamza/Setra402/programs/setra402/src/constants.rs` - Constants and seeds
-- `/home/alihamza/Setra402/programs/setra402/src/instructions/` - All instruction implementations
+- `/Setra402/programs/setra402/src/lib.rs` - Program entrypoint
+- `/Setra402/programs/setra402/src/state.rs` - Account structures
+- `/Setra402/programs/setra402/src/constants.rs` - Constants and seeds
+- `/Setra402/programs/setra402/src/instructions/` - All instruction implementations
 
 ### Shared Types
-- `/home/alihamza/Setra402/shared/task-anchor-types/src/lib.rs` - Shared type definitions
+- `Setra402/shared/task-anchor-types/src/lib.rs` - Shared type definitions
 
 ### Documentation
-- `/home/alihamza/Setra402/SELLER_SERVER_INTEGRATION.md` - Detailed integration guide
-- `/home/alihamza/Setra402/STATE.md` - Current project state
-- `/home/alihamza/Setra402/AGENT.md` - Agent rules and invariants
+- `/Setra402/SELLER_SERVER_INTEGRATION.md` - Detailed integration guide
+- `/Setra402/STATE.md` - Current project state
+- `/Setra402/AGENT.md` - Agent rules and invariants
+
+## Role B Closeout Addendum
+
+Two bugs were found and fixed during post-integration verification, and the live 402 flow was verified against a real validator:
+
+#### Fix 1: Expired tasks no longer execute (`src/handlers.rs`)
+- A Pending task past its `deadline_unix` used to execute and return 200, letting a buyer receive the output hash AND a full on-chain refund.
+- The handler now rejects execution with **410 GONE** at the same boundary the on-chain `refund_task` uses (`now >= deadline_unix`).
+- Buyer agents MUST handle `410` by treating the task as expired (stop retrying; refund path applies).
+
+#### Fix 2: RPC client aborted by real Agave validators (`src/rpc.rs`)
+- The client half-closed the TCP connection (`stream.shutdown()`) immediately after writing the request. Real Agave validators abort such requests and return an empty body, surfacing as `500 RPC error: couldn't parse`. Mocked tests never caught it because the fake RPC tolerated the early FIN.
+- The premature shutdown was removed (`Connection: close` already handles termination). Verified live: unpaid POST returns 402 + full quote (correct PDAs, `protocol_fee_bps: 100`), private flag honored, GET result 404 before payment.
+
+#### Docker environment notes
+- Agave 4.x requires Linux `io_uring`; Docker's default seccomp profile blocks it, so the validator crashes instantly. Run with `--security-opt seccomp=unconfined` (add `security_opt: ["seccomp=unconfined"]` to the validator service in `docker-compose.dev.yml`).
+- `docker-compose.dev.yml` env placeholders (`MINT_ADDRESS`, etc.) are empty by default — provide valid pubkeys or the seller-server exits at startup.
+
+#### Test baseline
+- 34 tests total (18 unit + 16 integration), passing on host Rust 1.89 AND inside the Docker builder stage (Rust 1.75).
+- New tests: PDA cross-check vs `pda.rs`, per-task PDA divergence, underpaid-private 402 quote, inverse privacy mismatch, per-task result isolation + 404, fixed SHA-256 vector (`sha256("{\"a\":1}") = 015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862`), and the expired-410 / future-deadline-OK boundary pair.
 
 ## Git Status
 - **Branch**: `feature/seller-server-integration`
