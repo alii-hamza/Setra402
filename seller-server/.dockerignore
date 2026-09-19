@@ -1,0 +1,39 @@
+# Docker ignore file for seller-server
+# Reduces build context size and speeds up builds
+
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+README.md
+*.md
+
+# Tests
+tests/
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose*.yml

@@ -1,0 +1,52 @@
+# Development Docker Compose for Setra402
+# Includes local validator and seller server
+
+version: '3.8'
+
+services:
+  # Local Solana Validator (for development)
+  validator:
+    build:
+      context: .
+      dockerfile: Dockerfile.validator
+    container_name: setra402-validator
+    ports:
+      - "8899:8899"   # RPC
+      - "8900:8900"   # WebSocket
+    volumes:
+      - validator-ledger:/root/.local/share/solana/install
+    networks:
+      - setra402-network
+
+  # Seller Server
+  seller-server:
+    build:
+      context: ./seller-server
+      dockerfile: Dockerfile
+    container_name: setra402-seller-server
+    ports:
+      - "3000:3000"
+    environment:
+      - RPC_HOST=validator
+      - RPC_PORT=8899
+      - PROGRAM_ID=FUjN9K7C5yHr5NhVrJ7WCgifgDiBJnSDDGQjnNkUDBMN
+      - MINT=${MINT_ADDRESS}
+      - SELLER_TOKEN_ACCOUNT=${SELLER_TOKEN_ACCOUNT}
+      - VERIFIER=${VERIFIER_ADDRESS}
+      - PROTOCOL_TREASURY=${PROTOCOL_TREASURY_ADDRESS}
+      - TASK_PRICE=1500000
+      - TASK_TIMEOUT_SECONDS=180
+      - BIND_ADDR=0.0.0.0:3000
+      - RUST_LOG=debug
+    depends_on:
+      - validator
+    networks:
+      - setra402-network
+    restart: unless-stopped
+
+volumes:
+  validator-ledger:
+
+networks:
+  setra402-network:
+    driver: bridge
