@@ -50,5 +50,6 @@ export function deriveNullifierPda(eta: Buffer): [PublicKey, number] {
   );
 }
 
-Fee InvariantsProtocol Settlement Fee: 100 BPS (1.0% to protocol treasury; 99.0% to seller)   Voluntary Cancellation Penalty: 500 BPS (5.0% to protocol treasury; 95.0% refund to buyer)   
-SLA Timeout Refund: 100% of principal back to buyer after deadline_unix expiration   
+**Fee InvariantsProtocol Settlement Fee: **
+//100 BPS (1.0% to protocol treasury; 99.0% to seller)   Voluntary Cancellation Penalty: 500 BPS (5.0% to protocol treasury; 95.0% refund to buyer)   
+//SLA Timeout Refund: 100% of principal back to buyer after deadline_unix expiration   
