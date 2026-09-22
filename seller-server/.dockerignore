@@ -6,6 +6,9 @@ target/
 **/*.rs.bk
 *.pdb
 
+# Exclude parent directory except shared types
+!../shared
+
 # IDE
 .vscode/
 .idea/

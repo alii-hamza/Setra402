@@ -10,19 +10,30 @@ services:
       context: .
       dockerfile: Dockerfile.validator
     container_name: setra402-validator
+    # Agave 4.x drives io_uring, which Docker's default seccomp profile blocks —
+    # without this the validator starts and immediately exits with code 1.
+    security_opt:
+      - seccomp=unconfined
     ports:
       - "8899:8899"   # RPC
       - "8900:8900"   # WebSocket
-    volumes:
-      - validator-ledger:/root/.local/share/solana/install
+    # No ledger volume: `solana-test-validator --reset` wipes the ledger on every
+    # start anyway, and mounting a volume over /root/.local/share/solana/install
+    # would shadow the Solana CLI binary installed in the image.
     networks:
       - setra402-network
+    # Without this, a host/Docker restart brings back the seller-server and Redis
+    # but not the validator, and every request then fails with 500 (RPC_HOST
+    # resolves to nothing).
+    restart: unless-stopped
 
   # Seller Server
   seller-server:
+    # Context is the repo root: the crate depends on ../shared/task-anchor-types,
+    # which a seller-server/ build context cannot reach.
     build:
-      context: ./seller-server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: seller-server/Dockerfile
     container_name: setra402-seller-server
     ports:
       - "3000:3000"
@@ -30,22 +41,31 @@ services:
       - RPC_HOST=validator
       - RPC_PORT=8899
       - PROGRAM_ID=FUjN9K7C5yHr5NhVrJ7WCgifgDiBJnSDDGQjnNkUDBMN
-      - MINT=${MINT_ADDRESS}
-      - SELLER_TOKEN_ACCOUNT=${SELLER_TOKEN_ACCOUNT}
-      - VERIFIER=${VERIFIER_ADDRESS}
-      - PROTOCOL_TREASURY=${PROTOCOL_TREASURY_ADDRESS}
+      - MINT=TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+      - SELLER_TOKEN_ACCOUNT=TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+      - VERIFIER=TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+      - PROTOCOL_TREASURY=TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
       - TASK_PRICE=1500000
       - TASK_TIMEOUT_SECONDS=180
       - BIND_ADDR=0.0.0.0:3000
       - RUST_LOG=debug
+      - REDIS_URL=redis://redis:6379
     depends_on:
       - validator
+      - redis
     networks:
       - setra402-network
     restart: unless-stopped
 
-volumes:
-  validator-ledger:
+  # Redis for Phase 3 nullifier caching
+  redis:
+    image: redis:alpine
+    container_name: setra402-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - setra402-network
+    restart: unless-stopped
 
 networks:
   setra402-network:

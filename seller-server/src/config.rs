@@ -5,6 +5,13 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
+// Phase 3 Cryptographic imports
+use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
+use curve25519_dalek::ristretto::RistrettoPoint;
+use curve25519_dalek::scalar::Scalar;
+use rand::rngs::OsRng;
+use redis::Client as RedisClient;
+
 // Fee constants matching on-chain program
 pub const PROTOCOL_FEE_BPS: u64 = 100; // 1%
 pub const CANCEL_PENALTY_BPS: u64 = 500; // 5%
@@ -25,6 +32,11 @@ pub struct AppState {
     /// instead if more than one buyer will ever run concurrently against
     /// this server (architecture doc, Section 3.2).
     pub results: Arc<Mutex<HashMap<u64, TaskResult>>>,
+
+    // Phase 3 Extensions
+    pub mint_secret_key: Scalar,
+    pub mint_public_key: RistrettoPoint,
+    pub redis_client: RedisClient,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -97,6 +109,16 @@ impl AppState {
             .ok()
             .and_then(|raw| Pubkey::from_str(&raw).ok());
 
+        // Phase 3: Redis connection
+        let redis_url = std::env::var("REDIS_URL")
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let redis_client = RedisClient::open(redis_url.as_str())
+            .map_err(|e| ConfigError::Invalid("REDIS_URL", e.to_string()))?;
+
+        // Phase 3: Generate mint keypair
+        let mint_secret_key = Scalar::random(&mut OsRng);
+        let mint_public_key = mint_secret_key * RISTRETTO_BASEPOINT_POINT;
+
         Ok(AppState {
             rpc: RpcClient::new(rpc_host, rpc_port),
             program_id: env_pubkey("PROGRAM_ID")?,
@@ -107,6 +129,9 @@ impl AppState {
             price,
             timeout_seconds,
             results: Arc::new(Mutex::new(HashMap::new())),
+            mint_secret_key,
+            mint_public_key,
+            redis_client,
         })
     }
 }

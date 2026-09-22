@@ -1,0 +1,44 @@
+# Docker ignore file for the repository-root build context
+# (seller-server/Dockerfile is built with `context: .`).
+#
+# Everything here is either rebuilt output, VCS metadata, or docs — none of it
+# is needed to compile the crate, and `target/` in particular is hundreds of
+# megabytes of host (glibc 2.39) artefacts that must never be shipped in the
+# build context.
+#
+# Note: seller-server/.dockerignore is now inert — Docker only reads a
+# .dockerignore sitting at the root of the context in use.
+
+# Build output
+target/
+**/*.rs.bk
+*.pdb
+
+# VCS + CI metadata
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# Node / Anchor tooling
+node_modules/
+.anchor/
+.yarn/
+test-ledger/
+
+# Documentation
+*.md
+
+# Local environment (keep .env.example — the runtime stage copies it in)
+.env
+.env.local
+.env.*.local
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

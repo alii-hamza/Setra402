@@ -19,6 +19,16 @@ solana-pubkey = { version = "=2.2.1", features = ["curve25519"] }
 # release that requires a newer Cargo edition than this toolchain supports.
 zeroize = "=1.8.2"
 
+# Phase 3 Dependencies
+curve25519-dalek = { version = "4.1", features = ["rand_core", "serde"] }
+rand = "0.8"
+redis = { version = "0.25", features = ["tokio-comp"] }
+
+# Shared types from workspace
+task-anchor-types = { path = "../shared/task-anchor-types" }
+borsh = "0.10"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+borsh = "0.10"

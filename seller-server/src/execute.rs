@@ -15,10 +15,25 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub fn execute_task(input: &Value) -> String {
+    // Reject floating-point numbers to prevent cross-language hash mismatches
+    // (Rust serde_json vs JavaScript JSON.stringify handle floats differently)
+    if contains_floats(input) {
+        panic!("floating-point numbers not supported in task input");
+    }
+    
     let canonical = serde_json::to_string(input).expect("Value serialization cannot fail");
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+fn contains_floats(value: &Value) -> bool {
+    match value {
+        Value::Number(n) => n.is_f64(),
+        Value::Array(arr) => arr.iter().any(contains_floats),
+        Value::Object(obj) => obj.values().any(contains_floats),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -58,5 +73,23 @@ mod tests {
         // breaks compatibility with the TypeScript verifier.
         let expected = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
         assert_eq!(execute_task(&json!({})), expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "floating-point numbers not supported")]
+    fn rejects_floating_point_numbers() {
+        execute_task(&json!({"value": 1.5}));
+    }
+
+    #[test]
+    #[should_panic(expected = "floating-point numbers not supported")]
+    fn rejects_nested_floats() {
+        execute_task(&json!({"nested": {"value": 2.0}}));
+    }
+
+    #[test]
+    fn accepts_integers() {
+        // Integers should work fine
+        execute_task(&json!({"value": 42}));
     }
 }

@@ -17,5 +17,8 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/tasks/:task_id", post(handlers::handle_task))
         .route("/tasks/:task_id/result", get(handlers::get_result))
+        // Phase 3 Cryptographic Endpoints
+        .route("/mint/blind-sign", post(handlers::handle_blind_sign))
+        .route("/verifier/nullify", post(handlers::handle_nullify))
         .with_state(state)
 }
