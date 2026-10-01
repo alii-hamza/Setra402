@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { PublicKey } from "@solana/web3.js";
 import {
   InvalidQuote,
@@ -6,16 +5,25 @@ import {
   ReplayDetected,
   SettlementTooCloseToDeadline,
   TaskConflict,
+  TransactionSubmissionError,
 } from "../errors.js";
 import { hashCanonical } from "../manifest/hash.js";
 import type { StoredManifest } from "../manifest/store.js";
 import type { TaskQuote, TaskStateView } from "../types.js";
 import { canSettleBeforeDeadline } from "./settlement.js";
 
+const REFUND_CLOCK_POLL_MS = 250;
+const MAX_REFUND_CLOCK_WAIT_MS = 10_000;
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 export interface SettlementChain {
   buyer: PublicKey;
   verifier: PublicKey;
   fetchTaskState(address: PublicKey): Promise<TaskStateView | null>;
+  getChainUnixTime(): Promise<number>;
   verifyManifestMemo(signature: string, expectedHash: string): Promise<void>;
   settlePublic(
     taskState: PublicKey,
@@ -72,7 +80,12 @@ export class SettlementCoordinator {
     }
     if (state.isPrivate !== quote.isPrivate)
       throw new InvalidQuote("TaskState privacy does not match quote");
-    const nowUnix = options.nowUnix ?? Math.floor(Date.now() / 1000);
+    const nowUnix =
+      options.nowUnix === undefined
+        ? await this.chain.getChainUnixTime()
+        : options.nowUnix;
+    if (!Number.isSafeInteger(nowUnix))
+      throw new RangeError("nowUnix must be a safe integer");
     if (
       !canSettleBeforeDeadline(
         nowUnix,
@@ -84,7 +97,7 @@ export class SettlementCoordinator {
         "settlement safety margin has been reached"
       );
     }
-    this.assertLocalManifest(quote, record);
+    this.assertLocalManifest(quote, record, state);
     if (!record.initializeSignature)
       throw new ManifestMismatch("initialize transaction signature is missing");
     await this.chain.verifyManifestMemo(
@@ -96,18 +109,31 @@ export class SettlementCoordinator {
     const sellerTokenAccount = new PublicKey(quote.sellerTokenAccount);
     let signature: string;
     let nullifier: Uint8Array | undefined;
+    let recoveredState: TaskStateView | null = null;
     if (quote.isPrivate) {
-      nullifier = options.nullifier ?? randomBytes(32);
+      nullifier = options.nullifier;
+      if (!nullifier)
+        throw new InvalidQuote(
+          "private settlement requires a verified Chaumian voucher nullifier"
+        );
       if (nullifier.length !== 32)
         throw new RangeError("nullifier must be exactly 32 bytes");
       if (await this.chain.fetchNullifierRecord(nullifier))
         throw new ReplayDetected("nullifier already exists on chain");
-      signature = await this.chain.settlePrivate(
-        taskStateAddress,
-        vault,
-        sellerTokenAccount,
-        nullifier
-      );
+      try {
+        signature = await this.chain.settlePrivate(
+          taskStateAddress,
+          vault,
+          sellerTokenAccount,
+          nullifier
+        );
+      } catch (error) {
+        if (!(error instanceof TransactionSubmissionError)) throw error;
+        recoveredState = await this.chain.fetchTaskState(taskStateAddress);
+        if (recoveredState?.status !== "settled") throw error;
+        if (!(await this.chain.fetchNullifierRecord(nullifier))) throw error;
+        signature = error.signature;
+      }
       if (this.mirrorNullifier) {
         try {
           await this.mirrorNullifier(nullifier);
@@ -116,14 +142,22 @@ export class SettlementCoordinator {
         }
       }
     } else {
-      signature = await this.chain.settlePublic(
-        taskStateAddress,
-        vault,
-        sellerTokenAccount
-      );
+      try {
+        signature = await this.chain.settlePublic(
+          taskStateAddress,
+          vault,
+          sellerTokenAccount
+        );
+      } catch (error) {
+        if (!(error instanceof TransactionSubmissionError)) throw error;
+        recoveredState = await this.chain.fetchTaskState(taskStateAddress);
+        if (recoveredState?.status !== "settled") throw error;
+        signature = error.signature;
+      }
     }
 
-    const settled = await this.chain.fetchTaskState(taskStateAddress);
+    const settled =
+      recoveredState ?? (await this.chain.fetchTaskState(taskStateAddress));
     if (!settled || settled.status !== "settled")
       throw new TaskConflict(
         "settlement confirmed but TaskState is not settled"
@@ -133,23 +167,35 @@ export class SettlementCoordinator {
       : { signature, state: settled };
   }
 
-  async refundExpired(
-    quote: TaskQuote,
-    nowUnix = Math.floor(Date.now() / 1000)
-  ): Promise<string> {
+  async refundExpired(quote: TaskQuote, nowUnix?: number): Promise<string> {
     const taskState = new PublicKey(quote.taskStatePda);
     const state = await this.requirePending(taskState);
-    if (nowUnix < state.deadlineUnix)
-      throw new TaskConflict("refund is not yet available");
+    if (nowUnix === undefined) {
+      await this.waitForRefundDeadline(state.deadlineUnix);
+    } else {
+      if (!Number.isSafeInteger(nowUnix))
+        throw new RangeError("nowUnix must be a safe integer");
+      if (nowUnix < state.deadlineUnix)
+        throw new TaskConflict("refund is not yet available");
+    }
     const buyerAta = await this.chain.requireBuyerAta(
       new PublicKey(state.mint)
     );
-    const signature = await this.chain.refund(
-      taskState,
-      new PublicKey(quote.vaultPda),
-      buyerAta
-    );
-    const refunded = await this.chain.fetchTaskState(taskState);
+    let signature: string;
+    let refunded: TaskStateView | null = null;
+    try {
+      signature = await this.chain.refund(
+        taskState,
+        new PublicKey(quote.vaultPda),
+        buyerAta
+      );
+    } catch (error) {
+      if (!(error instanceof TransactionSubmissionError)) throw error;
+      refunded = await this.chain.fetchTaskState(taskState);
+      if (refunded?.status !== "refunded") throw error;
+      signature = error.signature;
+    }
+    refunded ??= await this.chain.fetchTaskState(taskState);
     if (!refunded || refunded.status !== "refunded")
       throw new TaskConflict("refund confirmed but TaskState is not refunded");
     return signature;
@@ -168,12 +214,21 @@ export class SettlementCoordinator {
     const buyerAta = await this.chain.requireBuyerAta(
       new PublicKey(state.mint)
     );
-    const signature = await this.chain.cancel(
-      taskState,
-      new PublicKey(quote.vaultPda),
-      buyerAta
-    );
-    const cancelled = await this.chain.fetchTaskState(taskState);
+    let signature: string;
+    let cancelled: TaskStateView | null = null;
+    try {
+      signature = await this.chain.cancel(
+        taskState,
+        new PublicKey(quote.vaultPda),
+        buyerAta
+      );
+    } catch (error) {
+      if (!(error instanceof TransactionSubmissionError)) throw error;
+      cancelled = await this.chain.fetchTaskState(taskState);
+      if (cancelled?.status !== "refunded") throw error;
+      signature = error.signature;
+    }
+    cancelled ??= await this.chain.fetchTaskState(taskState);
     if (!cancelled || cancelled.status !== "refunded")
       throw new TaskConflict(
         "cancellation confirmed but TaskState is not refunded"
@@ -189,18 +244,50 @@ export class SettlementCoordinator {
     return state;
   }
 
-  private assertLocalManifest(quote: TaskQuote, record: StoredManifest): void {
+  private async waitForRefundDeadline(deadlineUnix: number): Promise<void> {
+    const stopAt = Date.now() + MAX_REFUND_CLOCK_WAIT_MS;
+    while (true) {
+      if ((await this.chain.getChainUnixTime()) >= deadlineUnix) return;
+      if (Date.now() >= stopAt)
+        throw new TaskConflict(
+          "seller reported expiration but the on-chain clock has not reached the refund deadline"
+        );
+      await delay(REFUND_CLOCK_POLL_MS);
+    }
+  }
+
+  private assertLocalManifest(
+    quote: TaskQuote,
+    record: StoredManifest,
+    state: TaskStateView
+  ): void {
     if (hashCanonical(record.manifest) !== record.manifestHash)
       throw new ManifestMismatch("local manifest hash mismatch");
     if (record.manifest.taskId !== quote.taskId.toString())
       throw new ManifestMismatch("manifest taskId mismatch");
     if (record.manifest.buyer !== this.chain.buyer.toBase58())
       throw new ManifestMismatch("manifest buyer mismatch");
+    if (record.manifest.sellerTokenAccount !== quote.sellerTokenAccount)
+      throw new ManifestMismatch("manifest sellerTokenAccount mismatch");
+    if (record.manifest.sellerOwner !== state.seller)
+      throw new ManifestMismatch("manifest sellerOwner mismatch");
     if (record.manifest.verifier !== quote.verifier)
       throw new ManifestMismatch("manifest verifier mismatch");
     if (record.manifest.mint !== quote.mint)
       throw new ManifestMismatch("manifest mint mismatch");
+    if (record.manifest.amountBaseUnits !== quote.amount.toString())
+      throw new ManifestMismatch("manifest amount mismatch");
+    if (record.manifest.timeoutSeconds !== quote.timeoutSeconds)
+      throw new ManifestMismatch("manifest timeout mismatch");
     if (record.manifest.isPrivate !== quote.isPrivate)
       throw new ManifestMismatch("manifest privacy mismatch");
+    if (record.manifest.quoteHash !== hashCanonical(quote.raw))
+      throw new ManifestMismatch("manifest quote hash mismatch");
+    if (state.taskId !== quote.taskId)
+      throw new ManifestMismatch("TaskState taskId mismatch");
+    if (state.amount !== quote.amount)
+      throw new ManifestMismatch("TaskState amount mismatch");
+    if (state.mint !== quote.mint)
+      throw new ManifestMismatch("TaskState mint mismatch");
   }
 }

@@ -34,4 +34,23 @@ describe("strict configuration", () => {
       /PROGRAM_ID|PROTOCOL_TREASURY_ADDRESS/
     );
   });
+
+  it("rejects a zero settlement safety margin", () => {
+    const dir = mkdtempSync(join(tmpdir(), "setra402-config-"));
+    const keypair = Keypair.generate();
+    const keypairPath = join(dir, "keypair.json");
+    writeFileSync(keypairPath, JSON.stringify(Array.from(keypair.secretKey)));
+
+    expect(() =>
+      loadConfig({
+        PROGRAM_ID: "FUjN9K7C5yHr5NhVrJ7WCgifgDiBJnSDDGQjnNkUDBMN",
+        RPC_URL: "http://127.0.0.1:8899",
+        SELLER_URL: "http://127.0.0.1:3000",
+        BUYER_KEYPAIR_PATH: keypairPath,
+        VERIFIER_KEYPAIR_PATH: keypairPath,
+        PROTOCOL_TREASURY_ADDRESS: Keypair.generate().publicKey.toBase58(),
+        SETTLEMENT_SAFETY_MARGIN_SEC: "0",
+      })
+    ).toThrow(/SETTLEMENT_SAFETY_MARGIN_SEC/);
+  });
 });

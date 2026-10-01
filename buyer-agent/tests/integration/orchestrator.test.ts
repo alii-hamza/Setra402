@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Keypair } from "@solana/web3.js";
-import { VerificationFailed } from "../../src/errors.js";
+import { TaskExpired, VerificationFailed } from "../../src/errors.js";
 import { hashCanonical } from "../../src/manifest/hash.js";
 import { BuyerOrchestrator } from "../../src/orchestrator.js";
 import type { StoredManifest } from "../../src/manifest/store.js";
@@ -55,15 +55,20 @@ const record: StoredManifest = {
   initializeSignature: "init",
 };
 
-function harness(outputHash: string) {
+function harness(
+  outputHash: string,
+  options: { expired?: boolean; isPrivate?: boolean } = {}
+) {
   const calls: string[] = [];
+  const effectiveQuote = { ...quote, isPrivate: options.isPrivate ?? false };
   const transport: SetraTransport = {
     async requestQuote() {
       calls.push("quote");
-      return quote;
+      return effectiveQuote;
     },
     async executeFundedTask(context) {
       calls.push("execute");
+      if (options.expired) throw new TaskExpired("expired");
       return { input: context.input, output_hash: outputHash };
     },
   };
@@ -74,16 +79,39 @@ function harness(outputHash: string) {
     },
   };
   const settlement = {
-    async settle() {
+    async settle(
+      _quote: TaskQuote,
+      _record: StoredManifest,
+      settlementOptions?: { nullifier?: Uint8Array }
+    ) {
       calls.push("settle");
+      if (options.isPrivate)
+        expect(settlementOptions?.nullifier).toEqual(
+          new Uint8Array(32).fill(7)
+        );
       return {
         signature: "settled",
         state: { ...state, status: "settled" as const },
       };
     },
+    async refundExpired() {
+      calls.push("refund");
+      return "refund-signature";
+    },
+  };
+  const privateTasks = {
+    async createVoucher() {
+      calls.push("voucher");
+      return { nullifier: new Uint8Array(32).fill(7) };
+    },
   };
   return {
-    orchestrator: new BuyerOrchestrator(transport, funding, settlement),
+    orchestrator: new BuyerOrchestrator(
+      transport,
+      funding,
+      settlement,
+      privateTasks
+    ),
     calls,
   };
 }
@@ -100,6 +128,8 @@ describe("legacy public/private compatibility orchestration", () => {
       serviceId: "legacy-rest",
       policyHash: "22".repeat(32),
     });
+    expect(result.status).toBe("settled");
+    if (result.status !== "settled") throw new Error("expected settlement");
     expect(result.settlement.signature).toBe("settled");
     expect(calls).toEqual(["quote", "fund", "execute", "settle"]);
   });
@@ -117,5 +147,39 @@ describe("legacy public/private compatibility orchestration", () => {
       })
     ).rejects.toBeInstanceOf(VerificationFailed);
     expect(calls.includes("settle")).toBe(false);
+  });
+
+  it("enters the refund path on HTTP 410 and never settles", async () => {
+    const input = { job: "expired" };
+    const { orchestrator, calls } = harness(hashCanonical(input), {
+      expired: true,
+    });
+    const result = await orchestrator.runLegacy({
+      taskId: 9n,
+      buyer: state.buyer,
+      input,
+      isPrivate: false,
+      serviceId: "legacy-rest",
+      policyHash: "22".repeat(32),
+    });
+    expect(result.status).toBe("refunded");
+    expect(calls).toEqual(["quote", "fund", "execute", "refund"]);
+  });
+
+  it("requires and verifies a blind voucher before private settlement", async () => {
+    const input = { job: "private" };
+    const { orchestrator, calls } = harness(hashCanonical(input), {
+      isPrivate: true,
+    });
+    const result = await orchestrator.runLegacy({
+      taskId: 9n,
+      buyer: state.buyer,
+      input,
+      isPrivate: true,
+      serviceId: "legacy-rest",
+      policyHash: "22".repeat(32),
+    });
+    expect(result.status).toBe("settled");
+    expect(calls).toEqual(["quote", "fund", "execute", "voucher", "settle"]);
   });
 });

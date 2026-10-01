@@ -6,12 +6,13 @@ import {
   Connection,
   Keypair,
   PublicKey,
+  SYSVAR_CLOCK_PUBKEY,
   SystemProgram,
   Transaction,
   TransactionInstruction,
   type Signer,
 } from "@solana/web3.js";
-import { ManifestMismatch } from "../errors.js";
+import { ManifestMismatch, TransactionSubmissionError } from "../errors.js";
 import type { TaskStateView, TaskStatus } from "../types.js";
 import { encodeManifestMemo, MEMO_PROGRAM_ID } from "./memo.js";
 import { deriveBuyerAta, deriveNullifierPda } from "./pda.js";
@@ -53,6 +54,80 @@ export interface ChainClientOptions {
   maxSendAttempts?: number;
 }
 
+export interface SendRebuiltTransactionOptions {
+  connection: Connection;
+  buildInstructions: () => Promise<TransactionInstruction[]>;
+  payer: Keypair;
+  signers: Signer[];
+  maxAttempts: number;
+  onSigned?: (signature: string) => void;
+}
+
+export async function sendRebuiltTransaction(
+  options: SendRebuiltTransactionOptions
+): Promise<string> {
+  if (!Number.isSafeInteger(options.maxAttempts) || options.maxAttempts < 1)
+    throw new RangeError("maxAttempts must be a positive safe integer");
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= options.maxAttempts; attempt += 1) {
+    const latest = await options.connection.getLatestBlockhash("confirmed");
+    const transaction = new Transaction({
+      feePayer: options.payer.publicKey,
+      blockhash: latest.blockhash,
+      lastValidBlockHeight: latest.lastValidBlockHeight,
+    });
+    transaction.add(...(await options.buildInstructions()));
+    transaction.sign(...options.signers);
+    if (!transaction.signature)
+      throw new Error("signed transaction has no payer signature");
+    const expectedSignature = bs58.encode(transaction.signature);
+    options.onSigned?.(expectedSignature);
+    let signature = expectedSignature;
+    try {
+      const rpcSignature = await options.connection.sendRawTransaction(
+        transaction.serialize()
+      );
+      if (rpcSignature !== expectedSignature)
+        throw new Error(
+          "RPC returned a signature that differs from the signed transaction"
+        );
+      signature = rpcSignature;
+      const confirmation = await options.connection.confirmTransaction(
+        { signature, ...latest },
+        "confirmed"
+      );
+      if (confirmation.value.err) {
+        throw new Error(
+          `transaction ${signature} failed: ${JSON.stringify(
+            confirmation.value.err
+          )}`
+        );
+      }
+      return signature;
+    } catch (error) {
+      let knownFailure = false;
+      try {
+        const status = await options.connection.getSignatureStatus(signature, {
+          searchTransactionHistory: true,
+        });
+        if (status.value?.err === null) return signature;
+        knownFailure = status.value !== null;
+      } catch {
+        // The signature remains usable for state-based ambiguity recovery.
+      }
+      lastError = error;
+      if (knownFailure) break;
+      if (staleBlockhash(error) && attempt < options.maxAttempts) continue;
+      throw new TransactionSubmissionError(
+        `transaction ${signature} has an ambiguous submission result`,
+        signature,
+        error
+      );
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 export class ChainClient implements EscrowChain {
   readonly buyer: PublicKey;
   readonly verifier: PublicKey;
@@ -64,6 +139,8 @@ export class ChainClient implements EscrowChain {
     this.buyer = options.buyer.publicKey;
     this.verifier = options.verifier.publicKey;
     this.maxSendAttempts = options.maxSendAttempts ?? 2;
+    if (!Number.isSafeInteger(this.maxSendAttempts) || this.maxSendAttempts < 1)
+      throw new RangeError("maxSendAttempts must be a positive safe integer");
     const idlAddress =
       "address" in options.idl
         ? new PublicKey(String(options.idl.address))
@@ -140,6 +217,20 @@ export class ChainClient implements EscrowChain {
     );
   }
 
+  async getChainUnixTime(): Promise<number> {
+    const clock = await this.options.connection.getAccountInfo(
+      SYSVAR_CLOCK_PUBKEY,
+      "confirmed"
+    );
+    if (!clock || clock.data.length < 40)
+      throw new Error("Solana Clock sysvar is unavailable or malformed");
+    const unixTimestamp = clock.data.readBigInt64LE(32);
+    const result = Number(unixTimestamp);
+    if (!Number.isSafeInteger(result))
+      throw new RangeError("Solana Clock unix_timestamp is outside safe range");
+    return result;
+  }
+
   async initializeTaskWithMemo(input: InitializeTaskInput): Promise<string> {
     return this.sendRebuilt(
       async () => {
@@ -170,7 +261,8 @@ export class ChainClient implements EscrowChain {
         return [initialize, memo];
       },
       this.options.buyer,
-      [this.options.buyer]
+      [this.options.buyer],
+      input.onSigned
     );
   }
 
@@ -331,49 +423,16 @@ export class ChainClient implements EscrowChain {
   private async sendRebuilt(
     buildInstructions: () => Promise<TransactionInstruction[]>,
     payer: Keypair,
-    signers: Signer[]
+    signers: Signer[],
+    onSigned?: (signature: string) => void
   ): Promise<string> {
-    let lastError: unknown;
-    for (let attempt = 1; attempt <= this.maxSendAttempts; attempt += 1) {
-      const latest = await this.options.connection.getLatestBlockhash(
-        "confirmed"
-      );
-      const transaction = new Transaction({
-        feePayer: payer.publicKey,
-        blockhash: latest.blockhash,
-        lastValidBlockHeight: latest.lastValidBlockHeight,
-      });
-      transaction.add(...(await buildInstructions()));
-      transaction.sign(...signers);
-      let signature: string | null = null;
-      try {
-        signature = await this.options.connection.sendRawTransaction(
-          transaction.serialize()
-        );
-        const confirmation = await this.options.connection.confirmTransaction(
-          { signature, ...latest },
-          "confirmed"
-        );
-        if (confirmation.value.err) {
-          throw new Error(
-            `transaction ${signature} failed: ${JSON.stringify(
-              confirmation.value.err
-            )}`
-          );
-        }
-        return signature;
-      } catch (error) {
-        if (signature) {
-          const status = await this.options.connection.getSignatureStatus(
-            signature,
-            { searchTransactionHistory: true }
-          );
-          if (status.value && status.value.err === null) return signature;
-        }
-        lastError = error;
-        if (!staleBlockhash(error) || attempt === this.maxSendAttempts) break;
-      }
-    }
-    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    return sendRebuiltTransaction({
+      connection: this.options.connection,
+      buildInstructions,
+      payer,
+      signers,
+      maxAttempts: this.maxSendAttempts,
+      ...(onSigned ? { onSigned } : {}),
+    });
   }
 }

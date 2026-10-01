@@ -1,4 +1,4 @@
-import { ManifestMismatch, VerificationFailed } from "./errors.js";
+import { ManifestMismatch, TaskExpired, VerificationFailed } from "./errors.js";
 import type { EnsureFundedInput, FundedEscrow } from "./chain/escrow.js";
 import type { SettlementResult } from "./chain/settlement-coordinator.js";
 import { hashCanonical } from "./manifest/hash.js";
@@ -11,7 +11,19 @@ interface FundingCoordinator {
 }
 
 interface SettlementService {
-  settle(quote: TaskQuote, record: StoredManifest): Promise<SettlementResult>;
+  settle(
+    quote: TaskQuote,
+    record: StoredManifest,
+    options?: { nullifier?: Uint8Array }
+  ): Promise<SettlementResult>;
+  refundExpired(quote: TaskQuote): Promise<string>;
+}
+
+interface PrivateTaskService {
+  createVoucher(input: {
+    buyer: string;
+    taskId: bigint;
+  }): Promise<{ nullifier: Uint8Array }>;
 }
 
 export interface LegacyRunInput extends RequestContext {
@@ -23,7 +35,8 @@ export class BuyerOrchestrator {
   constructor(
     private readonly transport: SetraTransport,
     private readonly funding: FundingCoordinator,
-    private readonly settlement: SettlementService
+    private readonly settlement: SettlementService,
+    private readonly privateTasks?: PrivateTaskService
   ) {}
 
   async runLegacy(input: LegacyRunInput) {
@@ -39,14 +52,57 @@ export class BuyerOrchestrator {
         "cannot execute seller task until the initialization memo signature is recoverable"
       );
     }
-    const result = await this.transport.executeFundedTask(input);
-    if (!("output_hash" in result))
+    let result;
+    try {
+      result = await this.transport.executeFundedTask(input);
+    } catch (error) {
+      if (!(error instanceof TaskExpired)) throw error;
+      const refundSignature = await this.settlement.refundExpired(quote);
+      return {
+        status: "refunded" as const,
+        quote,
+        funded,
+        result: null,
+        settlement: null,
+        refundSignature,
+      };
+    }
+    if (
+      !result ||
+      typeof result !== "object" ||
+      !("output_hash" in result) ||
+      typeof result.output_hash !== "string" ||
+      !("input" in result)
+    )
       throw new VerificationFailed(
         "legacy flow received a non-legacy result envelope"
       );
     this.verifyLegacyResult(input.input, result);
-    const settlement = await this.settlement.settle(quote, funded.record);
-    return { quote, funded, result, settlement };
+    let nullifier: Uint8Array | undefined;
+    if (quote.isPrivate) {
+      if (!this.privateTasks)
+        throw new VerificationFailed(
+          "private task requires the legacy Chaumian voucher flow"
+        );
+      nullifier = (
+        await this.privateTasks.createVoucher({
+          buyer: input.buyer,
+          taskId: input.taskId,
+        })
+      ).nullifier;
+    }
+    const settlement = await this.settlement.settle(
+      quote,
+      funded.record,
+      nullifier ? { nullifier } : {}
+    );
+    return {
+      status: "settled" as const,
+      quote,
+      funded,
+      result,
+      settlement,
+    };
   }
 
   private verifyLegacyResult(

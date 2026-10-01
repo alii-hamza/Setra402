@@ -16,6 +16,7 @@ export interface InitializeTaskInput {
   vault: PublicKey;
   buyerTokenAccount: PublicKey;
   manifestHash: string;
+  onSigned?: (signature: string) => void;
 }
 
 export interface EscrowChain {
@@ -90,27 +91,6 @@ export class EscrowCoordinator {
       sellerTokenAccount,
       new PublicKey(quote.mint)
     );
-    if (existing) {
-      assertFundedState(existing, quote, this.chain.buyer, sellerOwner);
-      const record = this.manifests.load(quote.taskStatePda);
-      if (!record)
-        throw new InvalidQuote(
-          "task is funded but its local manifest record is missing"
-        );
-      return {
-        state: existing,
-        record,
-        initializeSignature: record.initializeSignature,
-      };
-    }
-
-    const buyerTokenAccount = await this.chain.requireBuyerAta(
-      new PublicKey(quote.mint)
-    );
-    const balance = await this.chain.tokenBalance(buyerTokenAccount);
-    if (balance < quote.amount)
-      throw new InvalidQuote("buyer ATA balance is below quoted amount");
-
     const manifest: TaskManifestV1 = {
       version: "1",
       taskId: quote.taskId.toString(),
@@ -128,6 +108,39 @@ export class EscrowCoordinator {
       quoteHash: hashCanonical(quote.raw),
     };
     const manifestHash = hashCanonical(manifest);
+    if (existing) {
+      assertFundedState(existing, quote, this.chain.buyer, sellerOwner);
+      const record = this.manifests.load(quote.taskStatePda);
+      if (!record)
+        throw new InvalidQuote(
+          "task is funded but its local manifest record is missing"
+        );
+      if (
+        record.manifestHash !== manifestHash ||
+        hashCanonical(record.manifest) !== record.manifestHash
+      ) {
+        throw new InvalidQuote(
+          "funded task does not match the requested manifest"
+        );
+      }
+      if (!record.initializeSignature)
+        throw new InvalidQuote(
+          "funded task is missing its initialization memo signature"
+        );
+      return {
+        state: existing,
+        record,
+        initializeSignature: record.initializeSignature,
+      };
+    }
+
+    const buyerTokenAccount = await this.chain.requireBuyerAta(
+      new PublicKey(quote.mint)
+    );
+    const balance = await this.chain.tokenBalance(buyerTokenAccount);
+    if (balance < quote.amount)
+      throw new InvalidQuote("buyer ATA balance is below quoted amount");
+
     let record: StoredManifest = {
       manifest,
       manifestHash,
@@ -149,12 +162,21 @@ export class EscrowCoordinator {
         vault: new PublicKey(quote.vaultPda),
         buyerTokenAccount,
         manifestHash,
+        onSigned: (signature) => {
+          initializeSignature = signature;
+          record = { ...record, initializeSignature: signature };
+          this.manifests.save(quote.taskStatePda, record);
+        },
       });
     } catch (error) {
       const recovered = await this.chain.fetchTaskState(taskState);
       if (!recovered) throw error;
       assertFundedState(recovered, quote, this.chain.buyer, sellerOwner);
-      return { state: recovered, record, initializeSignature: null };
+      if (!initializeSignature)
+        throw new InvalidQuote(
+          "task was funded but the initialization signature is unavailable"
+        );
+      return { state: recovered, record, initializeSignature };
     }
 
     const funded = await this.chain.fetchTaskState(taskState);

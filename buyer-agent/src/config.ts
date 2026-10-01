@@ -28,7 +28,10 @@ const configSchema = z.object({
     .string()
     .regex(/^\d+$/)
     .transform(Number)
-    .refine(Number.isSafeInteger),
+    .refine(
+      (value) => Number.isSafeInteger(value) && value > 0,
+      "must be a positive safe integer"
+    ),
 });
 
 export interface BuyerAgentConfig {

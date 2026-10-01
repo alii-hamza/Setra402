@@ -3,6 +3,7 @@ import { Keypair, PublicKey } from "@solana/web3.js";
 import {
   ReplayDetected,
   SettlementTooCloseToDeadline,
+  TransactionSubmissionError,
 } from "../../src/errors.js";
 import { hashCanonical } from "../../src/manifest/hash.js";
 import {
@@ -65,7 +66,7 @@ const manifest = {
   isPrivate: false,
   taskSpecHash: "11".repeat(32),
   policyHash: "22".repeat(32),
-  quoteHash: "33".repeat(32),
+  quoteHash: hashCanonical(quote.raw),
 };
 const record: StoredManifest = {
   manifest,
@@ -79,6 +80,9 @@ function fakeChain(state = pending()) {
   const chain: SettlementChain = {
     buyer,
     verifier,
+    async getChainUnixTime() {
+      return 100;
+    },
     async fetchTaskState() {
       calls.push("fetch");
       return current;
@@ -115,7 +119,13 @@ function fakeChain(state = pending()) {
       return "cancel-sig";
     },
   };
-  return { chain, calls };
+  return {
+    chain,
+    calls,
+    setState(next: TaskStateView) {
+      current = next;
+    },
+  };
 }
 
 describe("settlement coordination", () => {
@@ -130,12 +140,37 @@ describe("settlement coordination", () => {
     expect(calls).toEqual(["fetch", "memo", "settlePublic", "fetch"]);
   });
 
+  it("rejects a quote whose payout account differs from the committed manifest", async () => {
+    const { chain, calls } = fakeChain();
+    await expect(
+      new SettlementCoordinator(chain, 5).settle(
+        {
+          ...quote,
+          sellerTokenAccount: Keypair.generate().publicKey.toBase58(),
+        },
+        record,
+        { nowUnix: 100 }
+      )
+    ).rejects.toThrow(/sellerTokenAccount/);
+    expect(calls.includes("settlePublic")).toBe(false);
+  });
+
   it("refuses settlement inside the safety margin", async () => {
     const { chain, calls } = fakeChain(pending(105));
     await expect(
       new SettlementCoordinator(chain, 5).settle(quote, record, {
         nowUnix: 100,
       })
+    ).rejects.toBeInstanceOf(SettlementTooCloseToDeadline);
+    expect(calls).toEqual(["fetch"]);
+  });
+
+  it("uses the on-chain clock for the settlement safety margin", async () => {
+    const deadlineUnix = Number.MAX_SAFE_INTEGER;
+    const { chain, calls } = fakeChain(pending(deadlineUnix));
+    chain.getChainUnixTime = async () => deadlineUnix - 5;
+    await expect(
+      new SettlementCoordinator(chain, 5).settle(quote, record)
     ).rejects.toBeInstanceOf(SettlementTooCloseToDeadline);
     expect(calls).toEqual(["fetch"]);
   });
@@ -174,6 +209,73 @@ describe("settlement coordination", () => {
     expect(result.state.status).toBe("settled");
   });
 
+  it("recovers an ambiguously confirmed public settlement from TaskState", async () => {
+    const harness = fakeChain();
+    harness.chain.settlePublic = async () => {
+      harness.setState({ ...pending(), status: "settled" });
+      throw new TransactionSubmissionError(
+        "ambiguous",
+        "ambiguous-settle-signature"
+      );
+    };
+    const result = await new SettlementCoordinator(harness.chain, 5).settle(
+      quote,
+      record,
+      { nowUnix: 100 }
+    );
+    expect(result.signature).toBe("ambiguous-settle-signature");
+    expect(result.state.status).toBe("settled");
+  });
+
+  it("recovers an ambiguously confirmed private settlement from TaskState", async () => {
+    const harness = fakeChain(pending(200, true));
+    let nullifierReads = 0;
+    harness.chain.fetchNullifierRecord = async () =>
+      nullifierReads++ === 0 ? null : { settled: true };
+    harness.chain.settlePrivate = async () => {
+      harness.setState({ ...pending(200, true), status: "settled" });
+      throw new TransactionSubmissionError(
+        "ambiguous",
+        "ambiguous-private-signature"
+      );
+    };
+    const privateManifest = { ...manifest, isPrivate: true };
+    const result = await new SettlementCoordinator(harness.chain, 5).settle(
+      { ...quote, isPrivate: true },
+      {
+        ...record,
+        manifest: privateManifest,
+        manifestHash: hashCanonical(privateManifest),
+      },
+      { nowUnix: 100, nullifier: new Uint8Array(32).fill(4) }
+    );
+    expect(result.signature).toBe("ambiguous-private-signature");
+    expect(result.state.status).toBe("settled");
+  });
+
+  it("does not misattribute another private settlement after an ambiguous result", async () => {
+    const harness = fakeChain(pending(200, true));
+    harness.chain.settlePrivate = async () => {
+      harness.setState({ ...pending(200, true), status: "settled" });
+      throw new TransactionSubmissionError(
+        "ambiguous",
+        "ambiguous-private-signature"
+      );
+    };
+    const privateManifest = { ...manifest, isPrivate: true };
+    await expect(
+      new SettlementCoordinator(harness.chain, 5).settle(
+        { ...quote, isPrivate: true },
+        {
+          ...record,
+          manifest: privateManifest,
+          manifestHash: hashCanonical(privateManifest),
+        },
+        { nowUnix: 100, nullifier: new Uint8Array(32).fill(4) }
+      )
+    ).rejects.toBeInstanceOf(TransactionSubmissionError);
+  });
+
   it("uses refund only at or after the on-chain deadline", async () => {
     const { chain, calls } = fakeChain(pending(100));
     const result = await new SettlementCoordinator(chain, 5).refundExpired(
@@ -182,5 +284,58 @@ describe("settlement coordination", () => {
     );
     expect(result).toBe("refund-sig");
     expect(calls).toEqual(["fetch", "ata", "refund", "fetch"]);
+  });
+
+  it("recovers an ambiguously confirmed refund from TaskState", async () => {
+    const harness = fakeChain(pending(100));
+    harness.chain.refund = async () => {
+      harness.setState({ ...pending(100), status: "refunded" });
+      throw new TransactionSubmissionError(
+        "ambiguous",
+        "ambiguous-refund-signature"
+      );
+    };
+    await expect(
+      new SettlementCoordinator(harness.chain, 5).refundExpired(quote, 100)
+    ).resolves.toBe("ambiguous-refund-signature");
+  });
+
+  it("waits for the on-chain clock before refunding after seller expiration", async () => {
+    const harness = fakeChain(pending(100));
+    let chainUnix = 99;
+    Object.assign(harness.chain, {
+      async getChainUnixTime() {
+        const current = chainUnix;
+        chainUnix += 1;
+        return current;
+      },
+    });
+    harness.chain.refund = async () => {
+      if (chainUnix <= 100)
+        throw new TransactionSubmissionError(
+          "on-chain deadline has not been reached",
+          "early-refund-signature"
+        );
+      harness.setState({ ...pending(100), status: "refunded" });
+      return "refund-after-chain-deadline";
+    };
+
+    await expect(
+      new SettlementCoordinator(harness.chain, 5).refundExpired(quote)
+    ).resolves.toBe("refund-after-chain-deadline");
+  });
+
+  it("recovers an ambiguously confirmed cancellation from TaskState", async () => {
+    const harness = fakeChain(pending(200));
+    harness.chain.cancel = async () => {
+      harness.setState({ ...pending(200), status: "refunded" });
+      throw new TransactionSubmissionError(
+        "ambiguous",
+        "ambiguous-cancel-signature"
+      );
+    };
+    await expect(
+      new SettlementCoordinator(harness.chain, 5).cancelVoluntarily(quote, 100)
+    ).resolves.toBe("ambiguous-cancel-signature");
   });
 });

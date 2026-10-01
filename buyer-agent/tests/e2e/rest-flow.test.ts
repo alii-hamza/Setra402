@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
-import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Connection, PublicKey } from "@solana/web3.js";
@@ -10,13 +9,15 @@ import { ChainClient } from "../../src/chain/client.js";
 import { EscrowCoordinator } from "../../src/chain/escrow.js";
 import { SettlementCoordinator } from "../../src/chain/settlement-coordinator.js";
 import { loadKeypair } from "../../src/config.js";
-import { ReplayDetected, TaskExpired } from "../../src/errors.js";
+import { ReplayDetected } from "../../src/errors.js";
 import { hashCanonical } from "../../src/manifest/hash.js";
 import { ManifestStore } from "../../src/manifest/store.js";
 import { BuyerOrchestrator } from "../../src/orchestrator.js";
 import { LegacyChaumianClient } from "../../src/privacy/legacy-chaumian.js";
 import { validateQuote } from "../../src/quote.js";
 import { RestX402Transport } from "../../src/transport/rest-x402.js";
+import type { SetraTransport } from "../../src/transport/types.js";
+import type { TaskQuote } from "../../src/types.js";
 
 const required = (name: string): string => {
   const value = process.env[name];
@@ -29,6 +30,7 @@ describe("Phase 1 live REST/on-chain flow", () => {
   let escrow: EscrowCoordinator;
   let settlement: SettlementCoordinator;
   let transport: RestX402Transport;
+  let privacy: LegacyChaumianClient;
   let buyerAddress: string;
   const policyHash = hashCanonical({
     compatibility: "legacy-hash",
@@ -62,7 +64,7 @@ describe("Phase 1 live REST/on-chain flow", () => {
       chain,
       new ManifestStore(mkdtempSync(join(tmpdir(), "setra402-e2e-manifests-")))
     );
-    const privacy = new LegacyChaumianClient(sellerUrl);
+    privacy = new LegacyChaumianClient(sellerUrl);
     settlement = new SettlementCoordinator(chain, 1, async (nullifier) => {
       await privacy.mirrorNullifierAfterSettlement(nullifier);
     });
@@ -99,12 +101,13 @@ describe("Phase 1 live REST/on-chain flow", () => {
       serviceId: "legacy-rest",
       policyHash,
     });
+    expect(result.status).toBe("settled");
+    if (result.status !== "settled") throw new Error("expected settlement");
     expect(result.funded.state.status).toBe("pending");
     expect(result.settlement.state.status).toBe("settled");
   });
 
   it("preserves private settlement and rejects duplicate nullifier from on-chain state", async () => {
-    const nullifier = randomBytes(32);
     const first = context(true, { job: "private-e2e", value: 1 });
     const firstQuote = await transport.requestQuote(first);
     const firstFunded = await escrow.ensureFunded({
@@ -114,10 +117,14 @@ describe("Phase 1 live REST/on-chain flow", () => {
       policyHash,
     });
     await transport.executeFundedTask(first);
+    const voucher = await privacy.createVoucher({
+      buyer: first.buyer,
+      taskId: first.taskId,
+    });
     const firstSettlement = await settlement.settle(
       firstQuote,
       firstFunded.record,
-      { nullifier }
+      { nullifier: voucher.nullifier }
     );
     expect(firstSettlement.state.status).toBe("settled");
 
@@ -131,30 +138,48 @@ describe("Phase 1 live REST/on-chain flow", () => {
     });
     await transport.executeFundedTask(second);
     await expect(
-      settlement.settle(secondQuote, secondFunded.record, { nullifier })
+      settlement.settle(secondQuote, secondFunded.record, {
+        nullifier: voucher.nullifier,
+      })
     ).rejects.toBeInstanceOf(ReplayDetected);
   });
 
   it("maps live 410 to the timeout-refund path", async () => {
     const run = context(false, { job: "expired-e2e" });
-    const quote = await transport.requestQuote(run);
-    const funded = await escrow.ensureFunded({
-      quote,
+    const quoteHolder: { current: TaskQuote | null } = { current: null };
+    const delayedTransport: SetraTransport = {
+      async requestQuote(request) {
+        quoteHolder.current = await transport.requestQuote(request);
+        return quoteHolder.current;
+      },
+      async executeFundedTask(request) {
+        const quote = quoteHolder.current;
+        if (!quote) throw new Error("quote missing");
+        const funded = await chain.fetchTaskState(
+          new PublicKey(quote.taskStatePda)
+        );
+        if (!funded) throw new Error("funded TaskState missing");
+        const waitMs = Math.max(
+          0,
+          (funded.deadlineUnix - Math.floor(Date.now() / 1000) + 1) * 1000
+        );
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        return transport.executeFundedTask(request);
+      },
+    };
+    const result = await new BuyerOrchestrator(
+      delayedTransport,
+      escrow,
+      settlement
+    ).runLegacy({
+      ...run,
       serviceId: "legacy-rest",
-      input: run.input,
       policyHash,
     });
-    const waitMs = Math.max(
-      0,
-      (funded.state.deadlineUnix - Math.floor(Date.now() / 1000) + 1) * 1000
-    );
-    await new Promise((resolve) => setTimeout(resolve, waitMs));
-    await expect(transport.executeFundedTask(run)).rejects.toBeInstanceOf(
-      TaskExpired
-    );
-    await settlement.refundExpired(quote);
+    expect(result.status).toBe("refunded");
     expect(
-      (await chain.fetchTaskState(new PublicKey(quote.taskStatePda)))?.status
+      (await chain.fetchTaskState(new PublicKey(result.quote.taskStatePda)))
+        ?.status
     ).toBe("refunded");
   }, 20_000);
 

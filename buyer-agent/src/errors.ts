@@ -78,6 +78,12 @@ export class ReplayDetected extends SetraError {
   }
 }
 
+export class TransactionSubmissionError extends SetraError {
+  constructor(message: string, readonly signature: string, details?: unknown) {
+    super(message, "retry", details);
+  }
+}
+
 function errorMessage(body: unknown, fallback: string): string {
   if (
     body &&

@@ -84,6 +84,7 @@ function fakeChain(options: { initializationFails?: boolean } = {}) {
       calls.push("initializeTask");
       expect(input.seller.equals(sellerOwner)).toBe(true);
       expect(input.buyerTokenAccount.equals(buyerAta)).toBe(true);
+      input.onSigned?.("init-signature");
       if (options.initializationFails) throw new Error("ambiguous RPC failure");
       return "init-signature";
     },
@@ -133,7 +134,35 @@ describe("escrow funding coordination", () => {
       policyHash: "cd".repeat(32),
     });
     expect(result.state.status).toBe("pending");
-    expect(result.initializeSignature).toBeNull();
+    expect(result.initializeSignature).toBe("init-signature");
     expect(calls.filter((call) => call === "initializeTask")).toHaveLength(1);
+  });
+
+  it("rejects reuse of a funded task with a different committed input", async () => {
+    const { chain } = fakeChain();
+    let reads = 0;
+    chain.fetchTaskState = async () => {
+      reads += 1;
+      return reads === 1 ? null : fundedState();
+    };
+    const store = new ManifestStore(
+      mkdtempSync(join(tmpdir(), "setra402-manifests-"))
+    );
+    const coordinator = new EscrowCoordinator(chain, store);
+    await coordinator.ensureFunded({
+      quote,
+      serviceId: "legacy-rest",
+      input: { committed: true },
+      policyHash: "ef".repeat(32),
+    });
+
+    await expect(
+      coordinator.ensureFunded({
+        quote,
+        serviceId: "legacy-rest",
+        input: { committed: false },
+        policyHash: "ef".repeat(32),
+      })
+    ).rejects.toThrow(/manifest/i);
   });
 });
