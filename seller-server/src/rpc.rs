@@ -108,7 +108,10 @@ impl RpcClient {
         let result = self
             .call(
                 "getAccountInfo",
-                json!([pubkey.to_string(), {"encoding": "base64"}]),
+                // Buyer agents confirm initialize_task at `confirmed`. Querying
+                // the RPC default (`finalized`) can return a false "not paid"
+                // 402 for several slots immediately after funding.
+                json!([pubkey.to_string(), {"encoding": "base64", "commitment": "confirmed"}]),
             )
             .await?;
 
@@ -198,5 +201,29 @@ mod tests {
         let client = RpcClient::new(addr.ip().to_string(), addr.port());
         let result = client.get_account_data(&Pubkey::new_unique()).await;
         assert!(matches!(result, Err(RpcError::RpcError(_))));
+    }
+
+    #[tokio::test]
+    async fn requests_confirmed_commitment_for_post_funding_visibility() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let read = socket.read(&mut buf).await.unwrap();
+            let _ = request_tx.send(String::from_utf8_lossy(&buf[..read]).to_string());
+            let body = json!({"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": 1}, "value": null}}).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+
+        let client = RpcClient::new(addr.ip().to_string(), addr.port());
+        client.get_account_data(&Pubkey::new_unique()).await.unwrap();
+        let request = request_rx.await.unwrap();
+        assert!(request.contains("\"commitment\":\"confirmed\""));
     }
 }

@@ -1,0 +1,31 @@
+{
+  "name": "@setra402/buyer-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run tests/unit tests/integration",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:e2e": "vitest run tests/e2e",
+    "test:rest": "vitest run tests/integration/rest-x402.test.ts tests/e2e/rest-flow.test.ts",
+    "test:privacy": "vitest run tests/e2e/rest-flow.test.ts -t \"preserves private settlement\"",
+    "test:all": "npm run build && npm run test:unit && npm run test:integration && npm run test:e2e"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@solana/spl-token": "^0.3.9",
+    "@solana/web3.js": "^1.98.4",
+    "ajv": "^8.17.1",
+    "bn.js": "^5.2.2",
+    "bs58": "^6.0.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.1.6",
+    "@types/node": "^22.15.30",
+    "typescript": "^5.7.3",
+    "vitest": "^5.0.3"
+  }
+}
