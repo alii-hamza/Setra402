@@ -5,6 +5,7 @@ Completed on 2026-10-01. Phase 2 was not started.
 ## Commit and baseline
 
 - Phase 1 implementation commit: `97db09fc5dfe2845a5c7fd74aa0cb87d51460a98`
+- Phase 1 audit hardening commit: `be1bd8119210c258910ec87dd664bc5622fe4015`
 - Baseline Role B commit: `0c5e2f9e3e2b487f5c833df7859112344b409721`
 - Working branch: `codex/role-c-phase1`, created from `origin/feature/seller-server-integration`
 - Initial checked-out branch: `feature/seller-server-integration`; it was clean but behind its remote, so the Phase 1 branch was created from the remote Role B head before testing or editing.
@@ -45,6 +46,7 @@ Completed on 2026-10-01. Phase 2 was not started.
 - `buyer-agent/tests/unit/http-errors.test.ts`
 - `buyer-agent/tests/unit/phase1-core.test.ts`
 - `buyer-agent/tests/unit/privacy.test.ts`
+- `buyer-agent/tests/unit/chain-retry.test.ts`
 - `buyer-agent/tests/integration/escrow.test.ts`
 - `buyer-agent/tests/integration/orchestrator.test.ts`
 - `buyer-agent/tests/integration/rest-x402.test.ts`
@@ -54,6 +56,7 @@ Completed on 2026-10-01. Phase 2 was not started.
 ## Files modified
 
 - `seller-server/src/rpc.rs`: the seller's raw `getAccountInfo` call now requests `confirmed` commitment. This removes a live race in which a newly confirmed escrow was still read at the RPC default (`finalized`) and incorrectly returned another 402. A Rust regression test was added in the same file.
+- Phase 1 audit hardening modified the buyer-agent package/lockfile; chain client, escrow, settlement, configuration, errors, orchestrator, and legacy private-flow modules; and their unit, integration, and E2E tests. It added a direct `@noble/curves` dependency already present transitively in the Solana dependency graph.
 
 No Anchor program, PDA seed, program economic, shared protocol, or existing Role B test file was changed.
 
@@ -68,6 +71,9 @@ No Anchor program, PDA seed, program economic, shared protocol, or existing Role
 - Idempotent escrow initialization followed by a `TaskState` re-read and verification of all funded state fields.
 - Canonical manifest generation, SHA-256 commitment, local manifest store, memo encoding, and memo verification before settlement.
 - Settlement coordinator covering public settlement, existing Chaumian/private settlement, timeout refund, voluntary cancellation, duplicate-nullifier pre-check, and deadline safety margin.
+- Verified Chaumian blinding, unblinding, and seller mint-signature validation before private settlement; private settlement no longer invents an unrelated random nullifier.
+- Solana Clock sysvar checks for settlement and refund boundaries, including bounded waiting when HTTP 410 precedes the validator clock by a small amount.
+- Ambiguous transaction recovery records the signed transaction ID before submission, rebuilds stale transactions with fresh blockhashes/signatures, and verifies terminal on-chain state. Private recovery additionally requires the expected `NullifierRecord`.
 - The existing legacy private endpoints are isolated behind `privacy/legacy-chaumian.ts`; no private protocol or `NullifierRecord` semantics were rewritten.
 - Redis remains a best-effort post-settlement cache mirror; on-chain state is the financial/nullifier source of truth.
 
@@ -140,16 +146,16 @@ git diff --check
 
 ## Final test results
 
-| Suite                                           | Passed | Failed |
-| ----------------------------------------------- | -----: | -----: |
-| Role B seller-server (17 unit + 22 integration) |     39 |      0 |
-| Existing Anchor/on-chain suite                  |      5 |      0 |
-| Role C unit                                     |     25 |      0 |
-| Role C integration                              |     14 |      0 |
-| Role C live E2E                                 |      4 |      0 |
-| **Total executed**                              | **87** |  **0** |
+| Suite                                           |  Passed | Failed |
+| ----------------------------------------------- | ------: | -----: |
+| Role B seller-server (17 unit + 22 integration) |      39 |      0 |
+| Existing Anchor/on-chain suite                  |       5 |      0 |
+| Role C unit                                     |      29 |      0 |
+| Role C integration                              |      25 |      0 |
+| Role C live E2E                                 |       4 |      0 |
+| **Total executed**                              | **102** |  **0** |
 
-The Role C aggregate was 43 passed and 0 failed. The Role B suite increased from 38 to 39 because of the new confirmed-commitment regression test; all pre-existing tests remained green.
+The final Role C aggregate was 58 passed and 0 failed. The Role B suite increased from 38 to 39 because of the new confirmed-commitment regression test; all pre-existing tests remained green.
 
 The live E2E cases exercised:
 
@@ -166,6 +172,7 @@ The live E2E cases exercised:
 - Confirmed the exact unpaid HTTP 402 quote and independently derived its task/vault PDAs.
 - Confirmed a real funded request returned HTTP 200 after the on-chain `TaskState` became Pending.
 - Confirmed a genuinely expired Pending task returned HTTP 410 with the expected deadline payload.
+- Reproduced a host/validator clock-skew failure during the strict audit, then confirmed the 410 path waits for the Solana Clock sysvar and completes the refund.
 - Recorded the observed wire contract in `buyer-agent/docs/live-contract.md`.
 
 ## Documentation/source discrepancies
@@ -184,6 +191,7 @@ The live E2E cases exercised:
 - Manifest storage is local filesystem storage. It is suitable for this Phase 1 single-agent process, not a future distributed marketplace.
 - E2E tests require an externally running local validator, Redis, seller-server, and funded fixture accounts; generated fixture keys remain ignored under `target/` and are not committed.
 - `cargo fmt --all --check` reports pre-existing formatting differences across unrelated Rust files. Phase 1 did not reformat Role A/B wholesale.
+- Refund clock-skew handling waits for the on-chain deadline for at most 10 seconds. Larger infrastructure clock divergence is reported as a terminal state conflict for operator investigation rather than retried without bound.
 
 ## Intentionally deferred to Phase 2 and later
 
