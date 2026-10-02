@@ -27,11 +27,9 @@ pub struct AppState {
     pub protocol_treasury: Option<Pubkey>,
     pub price: u64,
     pub timeout_seconds: i64,
-    /// Keyed by `task_id` alone, which is enough for this single-buyer demo.
-    /// On-chain uniqueness is really `(buyer, task_id)` — key by that pair
-    /// instead if more than one buyer will ever run concurrently against
-    /// this server (architecture doc, Section 3.2).
-    pub results: Arc<Mutex<HashMap<u64, TaskResult>>>,
+    /// Keyed by the TaskState PDA, which includes both buyer and task ID.
+    pub results: Arc<Mutex<HashMap<String, TaskResult>>>,
+    pub execution_store: Option<std::path::PathBuf>,
 
     // Phase 3 Extensions
     pub mint_secret_key: Scalar,
@@ -53,6 +51,7 @@ pub struct TaskResult {
 }
 
 #[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct TaskRequest {
     pub buyer: String,
     pub input: serde_json::Value,
@@ -68,6 +67,7 @@ fn default_service_id() -> String {
 
 #[derive(Serialize, Debug)]
 pub struct PaymentQuote {
+    #[serde(serialize_with = "serialize_u64")]
     pub task_id: u64,
     pub program_id: String,
     pub task_state_pda: String,
@@ -75,6 +75,7 @@ pub struct PaymentQuote {
     pub mint: String,
     pub seller_token_account: String,
     pub verifier: String,
+    #[serde(serialize_with = "serialize_u64")]
     pub amount: u64,
     pub timeout_seconds: i64,
     pub is_private: bool,
@@ -82,6 +83,14 @@ pub struct PaymentQuote {
     pub service_id: String,
     pub verification_policy: serde_json::Value,
     pub policy_hash: String,
+}
+
+fn serialize_u64<S: serde::Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+    if *value > 9_007_199_254_740_991 {
+        serializer.serialize_str(&value.to_string())
+    } else {
+        serializer.serialize_u64(*value)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -145,6 +154,11 @@ impl AppState {
             price,
             timeout_seconds,
             results: Arc::new(Mutex::new(HashMap::new())),
+            execution_store: Some(
+                std::env::var("SETRA_EXECUTION_STORE")
+                    .unwrap_or_else(|_| ".setra-state/executions".into())
+                    .into(),
+            ),
             mint_secret_key,
             mint_public_key,
             redis_client,

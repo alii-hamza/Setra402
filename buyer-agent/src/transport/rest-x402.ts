@@ -44,7 +44,9 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function normalizeResult(body: unknown): ResultEnvelopeV1 | LegacyTaskResult {
+export function normalizeResult(
+  body: unknown
+): ResultEnvelopeV1 | LegacyTaskResult {
   if (!body || typeof body !== "object")
     throw new ResultUnavailable("seller returned a non-object result");
   if (!("version" in body)) return body as LegacyTaskResult;

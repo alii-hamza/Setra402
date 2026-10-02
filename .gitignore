@@ -9,3 +9,5 @@ CONTEXT.md
 PHASE3_MINT_INTEGRATION.md
 ROLE_B_HANDOVER.md
 SELLER_SERVER_INTEGRATION.md
+.setra-state/
+buyer-agent/dist/

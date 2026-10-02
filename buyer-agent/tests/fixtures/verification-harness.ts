@@ -152,6 +152,9 @@ export function verificationHarness(
     chain,
     calls,
     current: () => state,
+    reset: () => {
+      state = { ...state, status: "pending" };
+    },
     settlement: new SettlementCoordinator(chain, 1),
     engine: new VerificationEngine(),
   };

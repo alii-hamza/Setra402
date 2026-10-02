@@ -8,6 +8,129 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use seller_server::config::AppState;
+
+// Phase 3 additions use the original handler harness without weakening any
+// Role B assertion.
+async fn retry_fixture() -> (AppState, Pubkey) {
+    let buyer = Pubkey::new_unique();
+    let mint = Pubkey::new_unique();
+    let data = encode_task_state(&buyer, &mint, PRICE, 0, 9_999_999_999, false);
+    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
+    let mut state = state_with_fake_chain(json!({"data":[encoded,"base64"]})).await;
+    state.mint = mint;
+    (state, buyer)
+}
+async fn retry_post(
+    state: AppState,
+    buyer: Pubkey,
+    input: Value,
+    service: &str,
+) -> axum::response::Response {
+    seller_server::build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/tasks/7")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"buyer":buyer.to_string(),"input":input,"service_id":service})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+#[tokio::test]
+async fn funded_retries_replay_identical_result() {
+    let (state, buyer) = retry_fixture().await;
+    let first =
+        body_json(retry_post(state.clone(), buyer, json!({}), "lead-scraper-demo").await).await;
+    let second = body_json(retry_post(state, buyer, json!({}), "lead-scraper-demo").await).await;
+    assert_eq!(first, second);
+}
+#[tokio::test]
+async fn retry_changed_input_rejected() {
+    let (state, buyer) = retry_fixture().await;
+    assert_eq!(
+        retry_post(state.clone(), buyer, json!({"a":1}), "legacy-rest")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        retry_post(state, buyer, json!({"a":2}), "legacy-rest")
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+}
+#[tokio::test]
+async fn retry_changed_service_rejected() {
+    let (state, buyer) = retry_fixture().await;
+    assert_eq!(
+        retry_post(state.clone(), buyer, json!({}), "legacy-rest")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        retry_post(state, buyer, json!({}), "lead-scraper-demo")
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+}
+#[tokio::test]
+async fn durable_result_replays_after_cache_restart() {
+    let (mut state, buyer) = retry_fixture().await;
+    let dir = std::env::temp_dir().join(format!("setra-retry-{}", Pubkey::new_unique()));
+    state.execution_store = Some(dir.clone());
+    let first = body_json(retry_post(state.clone(), buyer, json!({}), "legacy-rest").await).await;
+    state.results.lock().unwrap().clear();
+    let second = body_json(retry_post(state.clone(), buyer, json!({}), "legacy-rest").await).await;
+    assert_eq!(first, second);
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    std::fs::remove_dir(dir).unwrap();
+}
+#[tokio::test]
+async fn orphan_execution_intent_fails_closed() {
+    let (mut state, buyer) = retry_fixture().await;
+    let dir = std::env::temp_dir().join(format!("setra-intent-{}", Pubkey::new_unique()));
+    std::fs::create_dir(&dir).unwrap();
+    let (pda, _) = seller_server::pda::task_state_pda(&state.program_id, &buyer, TASK_ID);
+    let intent = dir.join(format!("{pda}.intent"));
+    std::fs::write(&intent, b"claimed").unwrap();
+    state.execution_store = Some(dir.clone());
+    assert_eq!(
+        retry_post(state, buyer, json!({}), "legacy-rest")
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    std::fs::remove_file(intent).unwrap();
+    std::fs::remove_dir(dir).unwrap();
+}
+#[tokio::test]
+async fn quotes_preserve_full_u64_task_id() {
+    let state = state_with_fake_chain(Value::Null).await;
+    let response = seller_server::build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/tasks/18446744073709551615")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"buyer":Pubkey::new_unique().to_string(),"input":{}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(body_json(response).await["task_id"], "18446744073709551615");
+}
 use seller_server::task_state::TaskStatus;
 use serde_json::{json, Value};
 use solana_pubkey::Pubkey;
@@ -73,6 +196,7 @@ async fn state_with_fake_chain(value: Value) -> AppState {
         price: PRICE,
         timeout_seconds: 180,
         results: Arc::new(Mutex::new(HashMap::new())),
+        execution_store: None,
         mint_secret_key,
         mint_public_key,
         redis_client,
@@ -244,7 +368,7 @@ async fn quote_and_result_add_phase2_fields_without_removing_legacy_fields() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/tasks/{TASK_ID}"))
+                .uri(format!("/tasks/{}", TASK_ID + 1))
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({

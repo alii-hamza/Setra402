@@ -157,6 +157,43 @@ pub async fn handle_task(
     }
 
     let output_hash = hash_canonical(&req.input).map_err(|message| bad_request(message))?;
+    let key = task_state_addr.to_string();
+    // One lock covers checking, claiming and executing the synchronous fixture.
+    // The durable exclusive intent also prevents a second process/restart from
+    // repeating an execution whose outcome is unknown.
+    let mut results = state
+        .results
+        .lock()
+        .map_err(|_| internal_error("result store unavailable"))?;
+    let saved_path = state
+        .execution_store
+        .as_ref()
+        .map(|dir| dir.join(format!("{key}.json")));
+    if let Some(path) = &saved_path {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                let saved: TaskResult = serde_json::from_slice(&bytes)
+                    .map_err(|_| internal_error("malformed persisted result"))?;
+                results.insert(key.clone(), saved);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(internal_error("cannot read persisted result")),
+        }
+    }
+    if let Some(saved) = results.get(&key) {
+        if saved.output_hash != output_hash || saved.service_id != service.id {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({"error":"task identity reused with different input or service"})),
+            ));
+        }
+        return Ok(Json(saved.clone()));
+    }
+    if let Some(dir) = &state.execution_store {
+        std::fs::create_dir_all(dir).map_err(|_| internal_error("execution store unavailable"))?;
+        std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join(format!("{key}.intent")))
+            .map_err(|_| (StatusCode::CONFLICT, Json(json!({"error":"execution already claimed; unresolved outcome requires reconciliation"}))))?;
+    }
     let completed_at_unix = now;
     let result_value = if service.id == "lead-scraper-demo" {
         let records: Vec<Value> =
@@ -192,11 +229,14 @@ pub async fn handle_task(
         evidence: Vec::new(),
         completed_at_unix,
     };
-    state
-        .results
-        .lock()
-        .expect("results mutex should not be poisoned")
-        .insert(task_id, result.clone());
+    if let Some(path) = saved_path {
+        let temporary = path.with_extension("tmp");
+        let bytes =
+            serde_json::to_vec(&result).map_err(|_| internal_error("cannot encode result"))?;
+        std::fs::write(&temporary, bytes).map_err(|_| internal_error("cannot persist result"))?;
+        std::fs::rename(temporary, path).map_err(|_| internal_error("cannot commit result"))?;
+    }
+    results.insert(key, result.clone());
 
     Ok(Json(result))
 }
@@ -205,14 +245,18 @@ pub async fn get_result(
     State(state): State<AppState>,
     Path(task_id): Path<u64>,
 ) -> Result<Json<TaskResult>, StatusCode> {
-    state
+    let results = state
         .results
         .lock()
-        .expect("results mutex should not be poisoned")
-        .get(&task_id)
-        .cloned()
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut matches = results
+        .values()
+        .filter(|result| result.task_id == task_id.to_string());
+    let result = matches.next().cloned().ok_or(StatusCode::NOT_FOUND)?;
+    if matches.next().is_some() {
+        return Err(StatusCode::CONFLICT);
+    }
+    Ok(Json(result))
 }
 
 // Phase 3: Blind signature endpoint
