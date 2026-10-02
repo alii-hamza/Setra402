@@ -8,10 +8,10 @@
 use crate::config::{AppState, PaymentQuote, TaskRequest, TaskResult, PROTOCOL_FEE_BPS};
 use crate::execute::hash_canonical;
 use crate::pda::{task_state_pda, vault_pda};
-use crate::registry::{find_service, policy_hash, services, ServiceDefinition};
+use crate::registry::{load_services, policy_hash, ServiceDefinition};
 use crate::task_state::{try_from_account_data, TaskStatus};
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -51,8 +51,8 @@ fn payment_required(
         mint: state.mint.to_string(),
         seller_token_account: state.seller_token_account.to_string(),
         verifier: state.verifier.to_string(),
-        amount: state.price,
-        timeout_seconds: state.timeout_seconds,
+        amount: service.price_base_units.parse().expect("validated price"),
+        timeout_seconds: service.timeout_seconds,
         is_private,
         protocol_fee_bps: PROTOCOL_FEE_BPS,
         service_id: service.id.clone(),
@@ -65,25 +65,56 @@ fn payment_required(
     )
 }
 
-pub async fn list_services() -> Json<Vec<ServiceDefinition>> {
-    Json(services().to_vec())
+pub async fn list_services(State(state): State<AppState>) -> Json<Vec<ServiceDefinition>> {
+    Json(load_services(
+        state.registry_overlay.as_deref(),
+        state.price,
+        state.timeout_seconds,
+    ))
 }
 
 pub async fn get_service(
+    State(state): State<AppState>,
     Path(service_id): Path<String>,
 ) -> Result<Json<ServiceDefinition>, StatusCode> {
-    find_service(&service_id)
-        .cloned()
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+    load_services(
+        state.registry_overlay.as_deref(),
+        state.price,
+        state.timeout_seconds,
+    )
+    .into_iter()
+    .find(|s| s.id == service_id)
+    .map(Json)
+    .ok_or(StatusCode::NOT_FOUND)
 }
 
 pub async fn handle_task(
     State(state): State<AppState>,
     Path(task_id): Path<u64>,
+    headers: HeaderMap,
     Json(req): Json<TaskRequest>,
 ) -> Result<Json<TaskResult>, ApiError> {
-    let service = find_service(&req.service_id).ok_or_else(|| bad_request("unknown service_id"))?;
+    let registry = load_services(
+        state.registry_overlay.as_deref(),
+        state.price,
+        state.timeout_seconds,
+    );
+    let service = registry
+        .iter()
+        .find(|s| s.id == req.service_id)
+        .ok_or_else(|| bad_request("unknown service_id"))?;
+    let transport = headers
+        .get("setra-transport")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("rest");
+    if !["rest", "mcp"].contains(&transport)
+        || (service.exposure != "both" && service.exposure != transport)
+    {
+        return Err(bad_request("service is not exposed over this transport"));
+    }
+    if req.is_private && !service.privacy_support {
+        return Err(bad_request("service does not support privacy"));
+    }
     let buyer =
         Pubkey::from_str(&req.buyer).map_err(|_| bad_request("buyer is not a valid pubkey"))?;
 
@@ -127,7 +158,13 @@ pub async fn handle_task(
         ));
     }
 
-    if task_state.amount < state.price || task_state.mint != state.mint {
+    if task_state.amount
+        < service
+            .price_base_units
+            .parse::<u64>()
+            .expect("validated price")
+        || task_state.mint != state.mint
+    {
         return Err(payment_required(
             &state,
             task_id,
@@ -195,7 +232,8 @@ pub async fn handle_task(
             .map_err(|_| (StatusCode::CONFLICT, Json(json!({"error":"execution already claimed; unresolved outcome requires reconciliation"}))))?;
     }
     let completed_at_unix = now;
-    let result_value = if service.id == "lead-scraper-demo" {
+    let mut evidence = Vec::new();
+    let result_value = if service.provider_connector_ref == "fixture-lead" {
         let records: Vec<Value> =
             if req.input.get("fixture").and_then(Value::as_str) == Some("invalid") {
                 vec![json!({"name": "Incomplete Lead"})]
@@ -214,8 +252,18 @@ pub async fn handle_task(
             "records": records,
             "generated_at_unix": completed_at_unix
         })
-    } else {
+    } else if service.provider_connector_ref == "fixture-source" {
+        json!({"records":(0..3).map(|_|json!({"company":if req.input["fixture"]=="invalid" {"Wrong"}else{"Acme"},"source_url":state.fixture_source_url})).collect::<Vec<_>>()})
+    } else if service.provider_connector_ref == "fixture-code" {
+        use sha2::{Digest, Sha256};
+        let artifact = fixture_artifact(&req.input);
+        let hash = hex::encode(Sha256::digest(artifact.as_bytes()));
+        evidence.push(json!({"type":"artifact","id":"code-module","content_hash":hash,"size_bytes":artifact.len(),"mime_type":"text/javascript"}));
+        json!({"artifact":{"id":"code-module","content_hash":hash,"size_bytes":artifact.len()}})
+    } else if service.provider_connector_ref == "fixture-echo" {
         req.input.clone()
+    } else {
+        return Err(bad_request("unsupported execution profile"));
     };
     let result_hash = hash_canonical(&result_value).map_err(|message| bad_request(message))?;
     let result = TaskResult {
@@ -226,7 +274,7 @@ pub async fn handle_task(
         service_id: service.id.clone(),
         result: result_value,
         result_hash,
-        evidence: Vec::new(),
+        evidence,
         completed_at_unix,
     };
     if let Some(path) = saved_path {
@@ -239,6 +287,54 @@ pub async fn handle_task(
     results.insert(key, result.clone());
 
     Ok(Json(result))
+}
+
+fn fixture_artifact(input: &Value) -> &'static str {
+    if input["fixture"] == "invalid" {
+        "export const add = (a,b) => a-b;"
+    } else {
+        "export const add = (a,b) => a+b;"
+    }
+}
+#[derive(Deserialize)]
+pub struct ArtifactQuery {
+    pub buyer: String,
+}
+pub async fn get_artifact(
+    State(state): State<AppState>,
+    Path((task_id, id)): Path<(u64, String)>,
+    Query(query): Query<ArtifactQuery>,
+) -> Result<([(&'static str, &'static str); 1], String), StatusCode> {
+    if id != "code-module" {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let buyer = Pubkey::from_str(&query.buyer).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let (pda, _) = task_state_pda(&state.program_id, &buyer, task_id);
+    let key = pda.to_string();
+    let mut result = state
+        .results
+        .lock()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .get(&key)
+        .cloned();
+    if result.is_none() {
+        if let Some(dir) = &state.execution_store {
+            if let Ok(bytes) = std::fs::read(dir.join(format!("{key}.json"))) {
+                result = serde_json::from_slice(&bytes).ok();
+            }
+        }
+    }
+    let result = result.ok_or(StatusCode::NOT_FOUND)?;
+    if result.result["artifact"]["id"] != "code-module" {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok((
+        [("content-type", "text/javascript")],
+        fixture_artifact(&result.input).into(),
+    ))
+}
+pub async fn fixture_source() -> Json<Value> {
+    Json(json!({"company":"Acme"}))
 }
 
 pub async fn get_result(

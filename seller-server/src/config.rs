@@ -30,6 +30,8 @@ pub struct AppState {
     /// Keyed by the TaskState PDA, which includes both buyer and task ID.
     pub results: Arc<Mutex<HashMap<String, TaskResult>>>,
     pub execution_store: Option<std::path::PathBuf>,
+    pub registry_overlay: Option<std::path::PathBuf>,
+    pub fixture_source_url: String,
 
     // Phase 3 Extensions
     pub mint_secret_key: Scalar,
@@ -159,6 +161,15 @@ impl AppState {
                     .unwrap_or_else(|_| ".setra-state/executions".into())
                     .into(),
             ),
+            registry_overlay: Some(
+                std::env::var("SETRA_SERVICE_OVERLAY")
+                    .unwrap_or_else(|_| {
+                        concat!(env!("CARGO_MANIFEST_DIR"), "/config/services.local.json").into()
+                    })
+                    .into(),
+            ),
+            fixture_source_url: std::env::var("SETRA_FIXTURE_SOURCE_URL")
+                .unwrap_or_else(|_| "https://example.com/setra-source".into()),
             mint_secret_key,
             mint_public_key,
             redis_client,

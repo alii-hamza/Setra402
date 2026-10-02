@@ -10,6 +10,7 @@ import type { QuoteNormalizer, SetraTransport } from "./types.js";
 
 export class McpTransport implements SetraTransport {
   private nextId = 1;
+  private initialization: Promise<void> | undefined;
   constructor(
     private readonly endpoint: string,
     private readonly normalizeQuote: QuoteNormalizer,
@@ -57,6 +58,7 @@ export class McpTransport implements SetraTransport {
     let lastError: unknown;
     for (let attempt = 0; attempt < this.retry.maxAttempts; attempt++) {
       try {
+        await this.initialize();
         const id = this.nextId++;
         const response = await fetch(this.endpoint, {
           method: "POST",
@@ -109,5 +111,63 @@ export class McpTransport implements SetraTransport {
         );
     }
     throw lastError;
+  }
+  private async initialize(): Promise<void> {
+    if (!this.initialization)
+      this.initialization = (async () => {
+        const id = this.nextId++;
+        const headers = {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        };
+        const response = await fetch(this.endpoint, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            method: "initialize",
+            params: {
+              protocolVersion: "2025-03-26",
+              capabilities: {},
+              clientInfo: { name: "setra402-buyer", version: "0.3.0" },
+            },
+          }),
+          signal: AbortSignal.timeout(this.retry.requestTimeoutMs ?? 10000),
+        });
+        const reply = (await response.json()) as {
+          id?: unknown;
+          result?: {
+            protocolVersion?: unknown;
+            capabilities?: { tools?: unknown };
+          };
+        };
+        if (
+          !response.ok ||
+          reply.id !== id ||
+          reply.result?.protocolVersion !== "2025-03-26" ||
+          !reply.result.capabilities?.tools
+        )
+          throw new ResultUnavailable("MCP initialization rejected");
+        const initialized = await fetch(this.endpoint, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            method: "notifications/initialized",
+          }),
+          signal: AbortSignal.timeout(this.retry.requestTimeoutMs ?? 10000),
+        });
+        if (initialized.status !== 202)
+          throw new ResultUnavailable(
+            "MCP initialization notification rejected"
+          );
+      })();
+    try {
+      await this.initialization;
+    } catch (error) {
+      this.initialization = undefined;
+      throw error;
+    }
   }
 }

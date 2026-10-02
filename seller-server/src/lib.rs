@@ -20,6 +20,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/services/:service_id", get(handlers::get_service))
         .route("/tasks/:task_id", post(handlers::handle_task))
         .route("/tasks/:task_id/result", get(handlers::get_result))
+        .route("/tasks/:task_id/artifacts/:id", get(handlers::get_artifact))
+        .route("/fixtures/company", get(handlers::fixture_source))
         // Phase 3 Cryptographic Endpoints
         .route("/mint/blind-sign", post(handlers::handle_blind_sign))
         .route("/verifier/nullify", post(handlers::handle_nullify))

@@ -32,13 +32,21 @@ export class SellerMcpAdapter implements ToolHandler {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
       if (!response.ok) throw new Error("registry unavailable");
-      return { services: await response.json() };
+      const services = (await response.json()) as { exposure?: string }[];
+      return {
+        services: services.filter(
+          (s) =>
+            s.exposure === undefined ||
+            s.exposure === "both" ||
+            s.exposure === "mcp"
+        ),
+      };
     }
     if (name !== "protected_call") throw new Error("unknown tool");
     const input = protectedCallSchema.parse(args);
     const response = await fetch(`${this.sellerUrl}/tasks/${input.task_id}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "setra-transport": "mcp" },
       body: JSON.stringify({
         buyer: input.buyer,
         service_id: input.service_id,

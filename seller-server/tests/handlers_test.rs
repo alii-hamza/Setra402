@@ -197,6 +197,8 @@ async fn state_with_fake_chain(value: Value) -> AppState {
         timeout_seconds: 180,
         results: Arc::new(Mutex::new(HashMap::new())),
         execution_store: None,
+        registry_overlay: None,
+        fixture_source_url: "https://example.com/setra-source".into(),
         mint_secret_key,
         mint_public_key,
         redis_client,

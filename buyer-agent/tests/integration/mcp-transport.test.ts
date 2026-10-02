@@ -42,16 +42,14 @@ const seller = createServer(async (req, res) => {
     return;
   }
   if (!funded) {
-    res
-      .writeHead(402)
-      .end(
-        JSON.stringify({
-          task_id: "9",
-          service_id: body.service_id,
-          verification_policy: policy,
-          policy_hash: hashCanonical(policy),
-        })
-      );
+    res.writeHead(402).end(
+      JSON.stringify({
+        task_id: "9",
+        service_id: body.service_id,
+        verification_policy: policy,
+        policy_hash: hashCanonical(policy),
+      })
+    );
     return;
   }
   calls++;

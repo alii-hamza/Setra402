@@ -8,6 +8,9 @@
     "build:runtime": "tsc -p tsconfig.runtime.json",
     "mcp:server": "npm run build:runtime && node dist/mcp/server.js",
     "mcp:stdio": "node dist/mcp/stdio.js",
+    "web": "npm run build:runtime && node dist/web/start.js",
+    "test:onboarding": "vitest run tests/unit/onboarding.test.ts tests/integration/onboarding-api.test.ts tests/e2e/onboarding-flow.test.ts",
+    "test:web": "vitest run tests/web",
     "test:mcp": "vitest run tests/unit/mcp-contracts.test.ts tests/integration/mcp-transport.test.ts tests/integration/task-controller.test.ts tests/integration/mcp-verification-parity.test.ts tests/e2e/mcp-flow.test.ts tests/e2e/mcp-terminal.test.ts",
     "test": "vitest run tests/unit tests/integration",
     "test:unit": "vitest run tests/unit",
@@ -17,7 +20,9 @@
     "test:l1": "vitest run tests/unit/verification-level1.test.ts tests/unit/verification-engine.test.ts tests/unit/canonical-vectors.test.ts tests/unit/artifact-loader.test.ts tests/integration/verification-settlement.test.ts",
     "test:l2": "vitest run tests/unit/source-sampling.test.ts tests/unit/test-suite.test.ts tests/integration/source-verification.test.ts tests/integration/level2-settlement.test.ts tests/sandbox",
     "test:privacy": "vitest run tests/e2e/rest-flow.test.ts -t \"preserves private settlement\"",
-    "test:all": "npm run build && npm run test:unit && npm run test:integration && npm run test:e2e"
+    "test:sandbox": "vitest run tests/sandbox",
+    "format:check": "prettier --check src tests config scripts package.json tsconfig.json tsconfig.runtime.json docs/PHASE3*.md ../frontend ../seller-server/config/provider-profiles.json",
+    "test:all": "node scripts/test-all.mjs"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
