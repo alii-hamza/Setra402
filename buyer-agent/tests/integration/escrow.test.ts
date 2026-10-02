@@ -6,6 +6,14 @@ import { Keypair, PublicKey } from "@solana/web3.js";
 import { EscrowCoordinator, type EscrowChain } from "../../src/chain/escrow.js";
 import { ManifestStore } from "../../src/manifest/store.js";
 import type { TaskQuote, TaskStateView } from "../../src/types.js";
+import { hashCanonical } from "../../src/manifest/hash.js";
+
+const policy = {
+  version: "1",
+  level: 1,
+  checks: [{ type: "json_schema", schema_ref: "generic-object-v1" }],
+} as const;
+const policyHash = hashCanonical(policy);
 
 const buyer = Keypair.generate().publicKey;
 const sellerOwner = Keypair.generate().publicKey;
@@ -18,6 +26,7 @@ const buyerAta = Keypair.generate().publicKey;
 
 const quote: TaskQuote = {
   taskId: 42n,
+  serviceId: "legacy-rest",
   programId: Keypair.generate().publicKey.toBase58(),
   taskStatePda: taskState.toBase58(),
   vaultPda: vault.toBase58(),
@@ -28,6 +37,8 @@ const quote: TaskQuote = {
   timeoutSeconds: 180,
   isPrivate: false,
   protocolFeeBps: 100,
+  verificationPolicy: policy,
+  policyHash,
   raw: {
     task_id: "42",
     program_id: Keypair.generate().publicKey.toBase58(),
@@ -40,6 +51,9 @@ const quote: TaskQuote = {
     timeout_seconds: 180,
     is_private: false,
     protocol_fee_bps: 100,
+    service_id: "legacy-rest",
+    verification_policy: policy,
+    policy_hash: policyHash,
   },
 };
 

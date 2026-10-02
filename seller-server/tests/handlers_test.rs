@@ -210,6 +210,7 @@ async fn quote_and_result_add_phase2_fields_without_removing_legacy_fields() {
     result_state.mint = mint;
     let result_router = seller_server::build_router(result_state);
     let result_response = result_router
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -238,6 +239,56 @@ async fn quote_and_result_add_phase2_fields_without_removing_legacy_fields() {
     assert_eq!(result["result_hash"].as_str().unwrap().len(), 64);
     assert!(result["evidence"].is_array());
     assert!(result["completed_at_unix"].is_number());
+
+    let invalid_response = result_router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/tasks/{TASK_ID}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "buyer": buyer.to_string(),
+                        "service_id": "lead-scraper-demo",
+                        "input": {"fixture": "invalid"}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_response.status(), StatusCode::OK);
+    let invalid = body_json(invalid_response).await;
+    assert_eq!(invalid["result"]["records"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        invalid["output_hash"],
+        seller_server::execute::execute_task(&json!({"fixture": "invalid"}))
+    );
+}
+
+#[tokio::test]
+async fn rejects_non_canonical_float_input_without_panicking() {
+    let buyer = Pubkey::new_unique();
+    let mint = Pubkey::new_unique();
+    let account_data = encode_task_state(&buyer, &mint, PRICE, 0, 9_999_999_999, false);
+    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &account_data);
+    let mut state = state_with_fake_chain(json!({"data": [encoded, "base64"]})).await;
+    state.mint = mint;
+    let response = seller_server::build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/tasks/{TASK_ID}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"buyer": buyer.to_string(), "input": {"value": 1.5}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

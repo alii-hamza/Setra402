@@ -6,10 +6,11 @@ import {
   SettlementTooCloseToDeadline,
   TaskConflict,
   TransactionSubmissionError,
+  VerificationFailed,
 } from "../errors.js";
 import { hashCanonical } from "../manifest/hash.js";
 import type { StoredManifest } from "../manifest/store.js";
-import type { TaskQuote, TaskStateView } from "../types.js";
+import type { TaskQuote, TaskStateView, VerificationReport } from "../types.js";
 import { canSettleBeforeDeadline } from "./settlement.js";
 
 const REFUND_CLOCK_POLL_MS = 250;
@@ -66,8 +67,13 @@ export class SettlementCoordinator {
   async settle(
     quote: TaskQuote,
     record: StoredManifest,
-    options: { nowUnix?: number; nullifier?: Uint8Array } = {}
+    options: {
+      report: VerificationReport;
+      nowUnix?: number;
+      nullifier?: Uint8Array;
+    }
   ): Promise<SettlementResult> {
+    this.assertVerificationReport(options.report, quote, record);
     const taskStateAddress = new PublicKey(quote.taskStatePda);
     const state = await this.requirePending(taskStateAddress);
     if (
@@ -165,6 +171,44 @@ export class SettlementCoordinator {
     return nullifier
       ? { signature, state: settled, nullifier }
       : { signature, state: settled };
+  }
+
+  private assertVerificationReport(
+    report: VerificationReport,
+    quote: TaskQuote,
+    record: StoredManifest
+  ): void {
+    if (
+      report.passed !== true ||
+      !Array.isArray(report.checks) ||
+      report.checks.length === 0 ||
+      report.checks.some((check) => check.passed !== true)
+    )
+      throw new VerificationFailed(
+        "settlement requires a passing VerificationReport"
+      );
+    if (report.level !== 1)
+      throw new VerificationFailed("settlement report level is unsupported");
+    if (report.taskId !== quote.taskId.toString())
+      throw new VerificationFailed("settlement report taskId mismatch");
+    if (
+      report.serviceId !== quote.serviceId ||
+      report.serviceId !== record.manifest.serviceId
+    )
+      throw new VerificationFailed("settlement report serviceId mismatch");
+    if (
+      report.manifestHash !== record.manifestHash ||
+      report.policyHash !== quote.policyHash ||
+      report.policyHash !== record.manifest.policyHash
+    )
+      throw new VerificationFailed("settlement report commitment mismatch");
+    if (
+      report.verifierPubkey !== this.chain.verifier.toBase58() ||
+      report.verifierPubkey !== quote.verifier
+    )
+      throw new VerificationFailed("settlement report verifier mismatch");
+    if (!/^[0-9a-f]{64}$/.test(report.resultHash))
+      throw new VerificationFailed("settlement report result hash is invalid");
   }
 
   async refundExpired(quote: TaskQuote, nowUnix?: number): Promise<string> {

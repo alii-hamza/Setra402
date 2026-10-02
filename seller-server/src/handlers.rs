@@ -6,7 +6,7 @@
 //! claims.
 
 use crate::config::{AppState, PaymentQuote, TaskRequest, TaskResult, PROTOCOL_FEE_BPS};
-use crate::execute::{execute_task, hash_canonical};
+use crate::execute::hash_canonical;
 use crate::pda::{task_state_pda, vault_pda};
 use crate::registry::{find_service, policy_hash, services, ServiceDefinition};
 use crate::task_state::{try_from_account_data, TaskStatus};
@@ -156,18 +156,23 @@ pub async fn handle_task(
         ));
     }
 
-    let output_hash = execute_task(&req.input);
+    let output_hash = hash_canonical(&req.input).map_err(|message| bad_request(message))?;
     let completed_at_unix = now;
     let result_value = if service.id == "lead-scraper-demo" {
-        let records: Vec<Value> = (1..=20)
-            .map(|index| {
-                json!({
-                    "name": format!("Lead {index}"),
-                    "company": format!("Company {index}"),
-                    "email": format!("lead{index}@fixture.local")
-                })
-            })
-            .collect();
+        let records: Vec<Value> =
+            if req.input.get("fixture").and_then(Value::as_str) == Some("invalid") {
+                vec![json!({"name": "Incomplete Lead"})]
+            } else {
+                (1..=20)
+                    .map(|index| {
+                        json!({
+                            "name": format!("Lead {index}"),
+                            "company": format!("Company {index}"),
+                            "email": format!("lead{index}@fixture.local")
+                        })
+                    })
+                    .collect()
+            };
         json!({
             "records": records,
             "generated_at_unix": completed_at_unix

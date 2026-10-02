@@ -15,6 +15,7 @@ import {
 } from "../../src/chain/memo.js";
 import { validateQuote } from "../../src/quote.js";
 import { canSettleBeforeDeadline } from "../../src/chain/settlement.js";
+import type { LegacyTaskQuoteWire } from "../../src/types.js";
 
 const programId = new PublicKey("FUjN9K7C5yHr5NhVrJ7WCgifgDiBJnSDDGQjnNkUDBMN");
 const buyer = new PublicKey("6HQf3NpnZaaCS1FykEKDBb5kCGaAE2kKLRWiNbGyzBBm");
@@ -24,6 +25,11 @@ const sellerTokenAccount = Keypair.generate().publicKey;
 const taskId = 402001n;
 const [taskStatePda] = deriveTaskPda(programId, buyer, taskId);
 const [vaultPda] = deriveVaultPda(programId, taskStatePda);
+const policy = {
+  version: "1",
+  level: 1,
+  checks: [{ type: "json_schema", schema_ref: "generic-object-v1" }],
+} as const;
 
 const validQuote = {
   task_id: taskId.toString(),
@@ -37,6 +43,9 @@ const validQuote = {
   timeout_seconds: 180,
   is_private: false,
   protocol_fee_bps: 100,
+  service_id: "legacy-rest",
+  verification_policy: policy,
+  policy_hash: hashCanonical(policy),
 };
 
 describe("Phase 1 chain derivations", () => {
@@ -66,7 +75,7 @@ describe("Phase 1 chain derivations", () => {
 });
 
 describe("Phase 1 quote validation", () => {
-  const validate = (quote: typeof validQuote) =>
+  const validate = (quote: LegacyTaskQuoteWire) =>
     validateQuote(quote, {
       programId,
       buyer,
@@ -74,9 +83,10 @@ describe("Phase 1 quote validation", () => {
       expectedMint: mint,
       taskId,
       isPrivate: false,
+      serviceId: "legacy-rest",
     });
 
-  it("accepts the source-compatible legacy quote", () => {
+  it("accepts the backward-compatible Phase 2 quote", () => {
     expect(validate(validQuote).amount).toBe(1_500_000n);
   });
 
@@ -92,6 +102,9 @@ describe("Phase 1 quote validation", () => {
     ["wrong privacy flag", { is_private: true }],
     ["zero amount", { amount: "0" }],
     ["invalid timeout", { timeout_seconds: 0 }],
+    ["wrong service", { service_id: "lead-scraper-demo" }],
+    ["wrong policy hash", { policy_hash: "ff".repeat(32) }],
+    ["invalid policy", { verification_policy: { version: "2" } }],
   ])("rejects %s", (_name, change) => {
     expect(() => validate({ ...validQuote, ...change })).toThrow();
   });

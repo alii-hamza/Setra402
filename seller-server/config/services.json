@@ -48,7 +48,8 @@
         {
           "type": "freshness",
           "timestamp_pointer": "/generated_at_unix",
-          "max_age_seconds": 3600
+          "max_age_seconds": 3600,
+          "max_future_skew_seconds": 5
         }
       ]
     }

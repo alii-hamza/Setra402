@@ -5,6 +5,7 @@ members = [
     "seller-server"
 ]
 resolver = "2"
+exclude = ["shared/test-vectors"]
 
 [profile.release]
 overflow-checks = true

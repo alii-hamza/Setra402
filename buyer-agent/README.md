@@ -1,10 +1,12 @@
-# Setra402 Buyer Agent — Phase 1
+# Setra402 Buyer Agent — Phase 2
 
-This package implements Role C Phase 1 only: strict configuration, current REST/HTTP-402 transport, IDL-driven escrow funding, manifest commitment by Solana Memo, legacy public/private settlement compatibility, timeout refunds, and cancellation compatibility.
+This package implements Role C through Phase 2: strict configuration, REST/HTTP-402 transport, IDL-driven escrow funding, manifest commitment by Solana Memo, public/private settlement compatibility, timeout refunds, cancellation compatibility, and policy-driven Level-1 deterministic verification.
 
-It deliberately contains no Level-1/Level-2 verification modules, MCP transport, frontend, AI advisory, TEE, or ZK implementation.
+Level-1 includes `json_schema`, `record_count`, `required_fields`, `unique`, `freshness`, `artifact_integrity`, and `solana_state`. Settlement requires a passing `VerificationReport`; legacy `output_hash` is retained only for wire compatibility and cannot authorize payment.
 
-The caller supplies the expected mint and the compatibility-policy hash when constructing the quote normalizer/orchestrator. They are not invented from fields absent from the current Role B quote.
+The seller quote supplies a committed service policy and policy hash. The buyer independently validates both, commits them in the task manifest, verifies the result and evidence, then re-reads on-chain state before settlement.
+
+Phase 3 work is deliberately absent: no Level-2 source sampling/test runner, MCP transport, frontend, AI advisory, TEE, or ZK implementation is included.
 
 ## Commands
 
@@ -13,6 +15,7 @@ npm run build
 npm run test:unit
 npm run test:integration
 npm run test:e2e       # requires the live ROLE_C_* test environment
+npm run test:l1
 npm run test:all       # same live environment requirement
 ```
 

@@ -48,6 +48,37 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[derive(serde::Deserialize)]
+    struct CanonicalVector {
+        name: String,
+        value: Value,
+        canonical: String,
+        sha256: String,
+    }
+
+    #[test]
+    fn matches_all_shared_phase2_canonical_vectors() {
+        let vectors: Vec<CanonicalVector> = serde_json::from_str(include_str!(
+            "../../shared/test-vectors/phase2-canonical-hashes.json"
+        ))
+        .unwrap();
+        assert!(vectors.len() >= 10);
+        for vector in vectors {
+            assert_eq!(
+                canonical_json(&vector.value).unwrap(),
+                vector.canonical,
+                "canonical bytes differ for {}",
+                vector.name
+            );
+            assert_eq!(
+                hash_canonical(&vector.value).unwrap(),
+                vector.sha256,
+                "SHA-256 differs for {}",
+                vector.name
+            );
+        }
+    }
+
     #[test]
     fn is_deterministic_for_the_same_input() {
         let input = json!({"job": "resize", "width": 128, "height": 128});

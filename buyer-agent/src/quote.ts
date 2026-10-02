@@ -2,6 +2,8 @@ import { PublicKey } from "@solana/web3.js";
 import { InvalidQuote } from "./errors.js";
 import { deriveTaskPda, deriveVaultPda } from "./chain/pda.js";
 import type { LegacyTaskQuoteWire, TaskQuote } from "./types.js";
+import { hashCanonical } from "./manifest/hash.js";
+import { parseVerificationPolicy } from "./verification/policy.js";
 
 export interface QuoteExpectations {
   programId: PublicKey;
@@ -11,6 +13,7 @@ export interface QuoteExpectations {
   taskId: bigint;
   isPrivate: boolean;
   protocolFeeBps?: number;
+  serviceId?: string;
 }
 
 function pubkey(field: string, value: unknown): PublicKey {
@@ -88,9 +91,24 @@ export function validateQuote(
   const fee = expected.protocolFeeBps ?? 100;
   if (wire.protocol_fee_bps !== fee)
     throw new InvalidQuote(`protocol_fee_bps must equal ${fee}`);
+  if (typeof wire.service_id !== "string" || wire.service_id.length === 0)
+    throw new InvalidQuote("service_id is required");
+  if (expected.serviceId && wire.service_id !== expected.serviceId)
+    throw new InvalidQuote("service_id does not match request");
+  let verificationPolicy;
+  try {
+    verificationPolicy = parseVerificationPolicy(wire.verification_policy);
+  } catch {
+    throw new InvalidQuote("verification_policy is invalid");
+  }
+  if (!/^[0-9a-f]{64}$/.test(wire.policy_hash))
+    throw new InvalidQuote("policy_hash must be 32-byte lowercase hex");
+  if (hashCanonical(verificationPolicy) !== wire.policy_hash)
+    throw new InvalidQuote("policy_hash does not match verification_policy");
 
   return {
     taskId,
+    serviceId: wire.service_id,
     programId: programId.toBase58(),
     taskStatePda: taskStatePda.toBase58(),
     vaultPda: vaultPda.toBase58(),
@@ -101,6 +119,8 @@ export function validateQuote(
     timeoutSeconds: wire.timeout_seconds,
     isPrivate: wire.is_private,
     protocolFeeBps: wire.protocol_fee_bps,
+    verificationPolicy,
+    policyHash: wire.policy_hash,
     raw: wire,
   };
 }

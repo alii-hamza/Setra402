@@ -1,5 +1,6 @@
 import {
   PaymentRequired,
+  ResultUnavailable,
   RetryableTransportError,
   SellerUnavailable,
   TaskConflict,
@@ -11,6 +12,7 @@ import type {
   LegacyTaskResult,
   RequestContext,
   ResultEnvelopeV1,
+  ResultEnvelopeWireV1,
 } from "../types.js";
 import type { QuoteNormalizer, SetraTransport } from "./types.js";
 
@@ -40,6 +42,38 @@ async function responseJson(response: Response): Promise<unknown> {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeResult(body: unknown): ResultEnvelopeV1 | LegacyTaskResult {
+  if (!body || typeof body !== "object")
+    throw new ResultUnavailable("seller returned a non-object result");
+  if (!("version" in body)) return body as LegacyTaskResult;
+  const wire = body as Partial<ResultEnvelopeWireV1>;
+  if (
+    wire.version !== "1" ||
+    typeof wire.task_id !== "string" ||
+    typeof wire.service_id !== "string" ||
+    typeof wire.result_hash !== "string" ||
+    !Array.isArray(wire.evidence) ||
+    !Number.isSafeInteger(wire.completed_at_unix) ||
+    typeof wire.output_hash !== "string" ||
+    !("input" in wire) ||
+    !("result" in wire)
+  )
+    throw new ResultUnavailable(
+      "seller returned a malformed Phase 2 result envelope"
+    );
+  return {
+    version: "1",
+    taskId: wire.task_id,
+    serviceId: wire.service_id,
+    result: wire.result,
+    resultHash: wire.result_hash,
+    evidence: wire.evidence,
+    completedAtUnix: wire.completed_at_unix as number,
+    input: wire.input,
+    output_hash: wire.output_hash,
+  };
 }
 
 export class RestX402Transport implements SetraTransport {
@@ -72,7 +106,7 @@ export class RestX402Transport implements SetraTransport {
     context: FundedTaskContext
   ): Promise<ResultEnvelopeV1 | LegacyTaskResult> {
     const { response, body, url } = await this.requestWithRetry(context, true);
-    if (response.ok) return body as ResultEnvelopeV1 | LegacyTaskResult;
+    if (response.ok) return normalizeResult(body);
     throw mapHttpFailure(response.status, body, url);
   }
 
@@ -94,6 +128,7 @@ export class RestX402Transport implements SetraTransport {
             buyer: context.buyer,
             input: context.input,
             is_private: context.isPrivate,
+            service_id: context.serviceId ?? "legacy-rest",
           }),
           signal: AbortSignal.timeout(this.retry.requestTimeoutMs),
         });

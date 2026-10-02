@@ -17,7 +17,11 @@ import { LegacyChaumianClient } from "../../src/privacy/legacy-chaumian.js";
 import { validateQuote } from "../../src/quote.js";
 import { RestX402Transport } from "../../src/transport/rest-x402.js";
 import type { SetraTransport } from "../../src/transport/types.js";
-import type { TaskQuote } from "../../src/types.js";
+import type { ResultEnvelopeV1, TaskQuote } from "../../src/types.js";
+import { VerificationCoordinator } from "../../src/verification/coordinator.js";
+import { VerificationEngine } from "../../src/verification/engine.js";
+import { DEFAULT_SCHEMA_REGISTRY } from "../../src/verification/schemas.js";
+import { SolanaRpcStateReader } from "../../src/verification/solana-reader.js";
 
 const required = (name: string): string => {
   const value = process.env[name];
@@ -25,17 +29,14 @@ const required = (name: string): string => {
   return value;
 };
 
-describe("Phase 1 live REST/on-chain flow", () => {
+describe("Phase 1/2 live REST/on-chain flow", () => {
   let chain: ChainClient;
   let escrow: EscrowCoordinator;
   let settlement: SettlementCoordinator;
   let transport: RestX402Transport;
   let privacy: LegacyChaumianClient;
+  let verification: VerificationCoordinator;
   let buyerAddress: string;
-  const policyHash = hashCanonical({
-    compatibility: "legacy-hash",
-    version: "1",
-  });
   let nextTaskId = BigInt(Date.now());
 
   beforeAll(() => {
@@ -52,8 +53,9 @@ describe("Phase 1 live REST/on-chain flow", () => {
         "utf8"
       )
     ) as Idl;
+    const connection = new Connection(rpcUrl, "confirmed");
     chain = new ChainClient({
-      connection: new Connection(rpcUrl, "confirmed"),
+      connection,
       idl,
       programId,
       buyer,
@@ -68,6 +70,12 @@ describe("Phase 1 live REST/on-chain flow", () => {
     settlement = new SettlementCoordinator(chain, 1, async (nullifier) => {
       await privacy.mirrorNullifierAfterSettlement(nullifier);
     });
+    verification = new VerificationCoordinator(
+      new VerificationEngine(),
+      chain,
+      DEFAULT_SCHEMA_REGISTRY,
+      new SolanaRpcStateReader(connection)
+    );
     transport = new RestX402Transport(
       sellerUrl,
       (wire, context) =>
@@ -78,6 +86,7 @@ describe("Phase 1 live REST/on-chain flow", () => {
           expectedMint,
           taskId: context.taskId,
           isPrivate: context.isPrivate,
+          serviceId: context.serviceId ?? "legacy-rest",
         }),
       { maxAttempts: 3, baseDelayMs: 20 }
     );
@@ -88,6 +97,7 @@ describe("Phase 1 live REST/on-chain flow", () => {
     buyer: buyerAddress,
     input,
     isPrivate,
+    serviceId: "legacy-rest",
   });
 
   it("unpaid 402 -> initialize_task -> funded re-read -> seller retry -> public settlement", async () => {
@@ -95,14 +105,14 @@ describe("Phase 1 live REST/on-chain flow", () => {
     const result = await new BuyerOrchestrator(
       transport,
       escrow,
-      settlement
-    ).runLegacy({
+      settlement,
+      verification
+    ).run({
       ...run,
       serviceId: "legacy-rest",
-      policyHash,
     });
-    expect(result.status).toBe("settled");
     if (result.status !== "settled") throw new Error("expected settlement");
+    expect(result.status).toBe("settled");
     expect(result.funded.state.status).toBe("pending");
     expect(result.settlement.state.status).toBe("settled");
   });
@@ -114,9 +124,17 @@ describe("Phase 1 live REST/on-chain flow", () => {
       quote: firstQuote,
       serviceId: "legacy-rest",
       input: first.input,
-      policyHash,
+      policyHash: firstQuote.policyHash,
     });
-    await transport.executeFundedTask(first);
+    const firstResult = (await transport.executeFundedTask(
+      first
+    )) as ResultEnvelopeV1;
+    const firstReport = await verification.verify(
+      firstFunded.record.manifest,
+      firstQuote.verificationPolicy,
+      firstResult,
+      firstFunded.record
+    );
     const voucher = await privacy.createVoucher({
       buyer: first.buyer,
       taskId: first.taskId,
@@ -124,7 +142,7 @@ describe("Phase 1 live REST/on-chain flow", () => {
     const firstSettlement = await settlement.settle(
       firstQuote,
       firstFunded.record,
-      { nullifier: voucher.nullifier }
+      { report: firstReport, nullifier: voucher.nullifier }
     );
     expect(firstSettlement.state.status).toBe("settled");
 
@@ -134,11 +152,20 @@ describe("Phase 1 live REST/on-chain flow", () => {
       quote: secondQuote,
       serviceId: "legacy-rest",
       input: second.input,
-      policyHash,
+      policyHash: secondQuote.policyHash,
     });
-    await transport.executeFundedTask(second);
+    const secondResult = (await transport.executeFundedTask(
+      second
+    )) as ResultEnvelopeV1;
+    const secondReport = await verification.verify(
+      secondFunded.record.manifest,
+      secondQuote.verificationPolicy,
+      secondResult,
+      secondFunded.record
+    );
     await expect(
       settlement.settle(secondQuote, secondFunded.record, {
+        report: secondReport,
         nullifier: voucher.nullifier,
       })
     ).rejects.toBeInstanceOf(ReplayDetected);
@@ -170,11 +197,11 @@ describe("Phase 1 live REST/on-chain flow", () => {
     const result = await new BuyerOrchestrator(
       delayedTransport,
       escrow,
-      settlement
+      settlement,
+      verification
     ).runLegacy({
       ...run,
       serviceId: "legacy-rest",
-      policyHash,
     });
     expect(result.status).toBe("refunded");
     expect(
@@ -190,11 +217,57 @@ describe("Phase 1 live REST/on-chain flow", () => {
       quote,
       serviceId: "legacy-rest",
       input: run.input,
-      policyHash,
+      policyHash: quote.policyHash,
     });
     await settlement.cancelVoluntarily(quote);
     expect(
       (await chain.fetchTaskState(new PublicKey(quote.taskStatePda)))?.status
     ).toBe("refunded");
   });
+
+  it("settles the deterministic Level-1 lead service only after a passing report", async () => {
+    const run = {
+      ...context(false, { fixture: "valid" }),
+      serviceId: "lead-scraper-demo",
+    };
+    const result = await new BuyerOrchestrator(
+      transport,
+      escrow,
+      settlement,
+      verification
+    ).run(run);
+    if (result.status !== "settled") throw new Error("expected settlement");
+    expect(result.status).toBe("settled");
+    expect(result.report.passed).toBe(true);
+    expect(result.report.checks.every((check) => check.passed)).toBe(true);
+  });
+
+  it("never lets a matching legacy hash override policy failure and refunds after timeout", async () => {
+    const input = { fixture: "invalid" };
+    const run = {
+      ...context(false, input),
+      serviceId: "lead-scraper-demo",
+    };
+    const result = await new BuyerOrchestrator(
+      transport,
+      escrow,
+      settlement,
+      verification
+    ).run(run);
+    expect(result.status).toBe("verification_failed");
+    if (result.status !== "verification_failed")
+      throw new Error("expected verification failure");
+    expect(result.result.output_hash).toBe(hashCanonical(input));
+    expect(result.report.passed).toBe(false);
+    expect(
+      (await chain.fetchTaskState(new PublicKey(result.quote.taskStatePda)))
+        ?.status
+    ).toBe("pending");
+
+    await settlement.refundExpired(result.quote);
+    expect(
+      (await chain.fetchTaskState(new PublicKey(result.quote.taskStatePda)))
+        ?.status
+    ).toBe("refunded");
+  }, 20_000);
 });

@@ -4,11 +4,17 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { TaskExpired } from "../../src/errors.js";
 import { RestX402Transport } from "../../src/transport/rest-x402.js";
 import type { LegacyTaskQuoteWire, TaskQuote } from "../../src/types.js";
+import { hashCanonical } from "../../src/manifest/hash.js";
 
 describe("REST/x402 transport", () => {
   let server: ReturnType<typeof createServer>;
   let baseUrl: string;
   let attempts = 0;
+  const policy = {
+    version: "1",
+    level: 1,
+    checks: [{ type: "json_schema", schema_ref: "generic-object-v1" }],
+  } as const;
 
   const quote: LegacyTaskQuoteWire = {
     task_id: 1,
@@ -22,6 +28,9 @@ describe("REST/x402 transport", () => {
     timeout_seconds: 10,
     is_private: false,
     protocol_fee_bps: 100,
+    service_id: "legacy-rest",
+    verification_policy: policy,
+    policy_hash: hashCanonical(policy),
   };
 
   beforeEach(async () => {
@@ -42,6 +51,22 @@ describe("REST/x402 transport", () => {
       } else if (taskId === "4") {
         res.statusCode = 400;
         res.end(JSON.stringify({ error: "permanent" }));
+      } else if (taskId === "6") {
+        const result = { records: [] };
+        res.statusCode = 200;
+        res.end(
+          JSON.stringify({
+            version: "1",
+            task_id: "6",
+            service_id: "legacy-rest",
+            result,
+            result_hash: hashCanonical(result),
+            evidence: [],
+            completed_at_unix: 100,
+            input: result,
+            output_hash: hashCanonical(result),
+          })
+        );
       } else {
         res.statusCode = 200;
         res.end(
@@ -64,6 +89,7 @@ describe("REST/x402 transport", () => {
 
   const normalize = (wire: LegacyTaskQuoteWire): TaskQuote => ({
     taskId: BigInt(wire.task_id),
+    serviceId: wire.service_id,
     programId: wire.program_id,
     taskStatePda: wire.task_state_pda,
     vaultPda: wire.vault_pda,
@@ -74,6 +100,8 @@ describe("REST/x402 transport", () => {
     timeoutSeconds: wire.timeout_seconds,
     isPrivate: wire.is_private,
     protocolFeeBps: wire.protocol_fee_bps,
+    verificationPolicy: policy,
+    policyHash: wire.policy_hash,
     raw: wire,
   });
 
@@ -152,5 +180,26 @@ describe("REST/x402 transport", () => {
       })
     ).rejects.toThrow(/permanent/);
     expect(attempts).toBe(1);
+  });
+
+  it("normalizes the additive Phase 2 result while preserving legacy fields", async () => {
+    const transport = new RestX402Transport(baseUrl, normalize, {
+      maxAttempts: 1,
+      baseDelayMs: 1,
+    });
+    const result = await transport.executeFundedTask({
+      taskId: 6n,
+      buyer: "buyer",
+      input: {},
+      isPrivate: false,
+      serviceId: "legacy-rest",
+    });
+    expect(result).toMatchObject({
+      version: "1",
+      taskId: "6",
+      serviceId: "legacy-rest",
+      completedAtUnix: 100,
+      output_hash: hashCanonical({ records: [] }),
+    });
   });
 });
