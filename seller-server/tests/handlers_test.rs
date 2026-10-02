@@ -7,9 +7,9 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
 use seller_server::config::AppState;
 use seller_server::task_state::TaskStatus;
+use serde_json::{json, Value};
 use solana_pubkey::Pubkey;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -58,7 +58,7 @@ async fn state_with_fake_chain(value: Value) -> AppState {
     // Phase 3: Generate test cryptographic keys
     let mint_secret_key = Scalar::random(&mut OsRng);
     let mint_public_key = mint_secret_key * RISTRETTO_BASEPOINT_POINT;
-    
+
     // Phase 3: Use a fake Redis client for testing
     let redis_client = RedisClient::open("redis://127.0.0.1:6379")
         .unwrap_or_else(|_| RedisClient::open("redis://localhost:6379").unwrap());
@@ -88,16 +88,16 @@ fn encode_task_state(
     deadline_unix: i64,
     is_private: bool,
 ) -> Vec<u8> {
-    use seller_server::task_state::TaskState;
     use borsh::BorshSerialize;
-    
+    use seller_server::task_state::TaskState;
+
     let status = match status_tag {
         0 => TaskStatus::Pending,
         1 => TaskStatus::Settled,
         2 => TaskStatus::Refunded,
         _ => TaskStatus::Pending,
     };
-    
+
     let task_state = TaskState {
         buyer: *buyer,
         seller: Pubkey::new_unique(),
@@ -110,7 +110,7 @@ fn encode_task_state(
         is_private,
         bump: 253,
     };
-    
+
     // Serialize using shared crate (Borsh)
     let mut bytes = vec![0u8; 8]; // discriminator
     bytes.extend_from_slice(&task_state.try_to_vec().unwrap());
@@ -120,6 +120,124 @@ fn encode_task_state(
 async fn body_json(response: axum::response::Response) -> Value {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn lists_static_services_and_fetches_one_by_id() {
+    let state = state_with_fake_chain(Value::Null).await;
+    let router = seller_server::build_router(state);
+
+    let list = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/services")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let list_body = body_json(list).await;
+    let services = list_body.as_array().expect("service list must be an array");
+    assert!(services
+        .iter()
+        .any(|service| service["id"] == "lead-scraper-demo"));
+
+    let one = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/services/lead-scraper-demo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(one.status(), StatusCode::OK);
+    let one_body = body_json(one).await;
+    assert_eq!(one_body["verification_policy"]["version"], "1");
+    assert_eq!(one_body["verification_policy"]["level"], 1);
+
+    let missing = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/services/does-not-exist")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn quote_and_result_add_phase2_fields_without_removing_legacy_fields() {
+    let buyer = Pubkey::new_unique();
+    let quote_state = state_with_fake_chain(Value::Null).await;
+    let quote_router = seller_server::build_router(quote_state);
+    let quote_request = Request::builder()
+        .method("POST")
+        .uri(format!("/tasks/{TASK_ID}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "buyer": buyer.to_string(),
+                "service_id": "lead-scraper-demo",
+                "input": {}
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let quote_response = quote_router.oneshot(quote_request).await.unwrap();
+    assert_eq!(quote_response.status(), StatusCode::PAYMENT_REQUIRED);
+    let quote = body_json(quote_response).await;
+    assert_eq!(quote["service_id"], "lead-scraper-demo");
+    assert_eq!(quote["verification_policy"]["level"], 1);
+    assert_eq!(quote["policy_hash"].as_str().unwrap().len(), 64);
+    assert!(
+        quote["program_id"].is_string(),
+        "legacy quote fields remain"
+    );
+
+    let mint = Pubkey::new_unique();
+    let account_data = encode_task_state(&buyer, &mint, PRICE, 0, 9_999_999_999, false);
+    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &account_data);
+    let mut result_state = state_with_fake_chain(json!({"data": [encoded, "base64"]})).await;
+    result_state.mint = mint;
+    let result_router = seller_server::build_router(result_state);
+    let result_response = result_router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/tasks/{TASK_ID}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "buyer": buyer.to_string(),
+                        "service_id": "lead-scraper-demo",
+                        "input": {}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result_response.status(), StatusCode::OK);
+    let result = body_json(result_response).await;
+    assert!(result["input"].is_object());
+    assert!(result["output_hash"].is_string());
+    assert_eq!(result["version"], "1");
+    assert_eq!(result["task_id"], TASK_ID.to_string());
+    assert_eq!(result["service_id"], "lead-scraper-demo");
+    assert!(result["result"].is_object());
+    assert_eq!(result["result_hash"].as_str().unwrap().len(), 64);
+    assert!(result["evidence"].is_array());
+    assert!(result["completed_at_unix"].is_number());
 }
 
 #[tokio::test]
@@ -155,7 +273,14 @@ async fn responds_402_when_no_payment_found() {
 async fn responds_200_and_a_matching_hash_once_paid() {
     let buyer = Pubkey::new_unique();
     let mint = Pubkey::new_unique();
-    let account_data = encode_task_state(&buyer, &mint, PRICE, 0 /* Pending */, 9_999_999_999, false);
+    let account_data = encode_task_state(
+        &buyer,
+        &mint,
+        PRICE,
+        0, /* Pending */
+        9_999_999_999,
+        false,
+    );
     let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &account_data);
 
     let mut state = state_with_fake_chain(json!({"data": [encoded, "base64"]})).await;
@@ -187,7 +312,14 @@ async fn responds_200_and_a_matching_hash_once_paid() {
 async fn responds_409_for_an_already_settled_task() {
     let buyer = Pubkey::new_unique();
     let mint = Pubkey::new_unique();
-    let account_data = encode_task_state(&buyer, &mint, PRICE, 1 /* Settled */, 9_999_999_999, false);
+    let account_data = encode_task_state(
+        &buyer,
+        &mint,
+        PRICE,
+        1, /* Settled */
+        9_999_999_999,
+        false,
+    );
     let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &account_data);
 
     let mut state = state_with_fake_chain(json!({"data": [encoded, "base64"]})).await;
@@ -254,7 +386,14 @@ async fn get_result_is_404_before_any_execution_and_200_after() {
 async fn handles_private_task_flag_correctly() {
     let buyer = Pubkey::new_unique();
     let mint = Pubkey::new_unique();
-    let account_data = encode_task_state(&buyer, &mint, PRICE, 0 /* Pending */, 9_999_999_999, true);
+    let account_data = encode_task_state(
+        &buyer,
+        &mint,
+        PRICE,
+        0, /* Pending */
+        9_999_999_999,
+        true,
+    );
     let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &account_data);
 
     let mut state = state_with_fake_chain(json!({"data": [encoded, "base64"]})).await;
@@ -286,7 +425,14 @@ async fn rejects_privacy_mismatch() {
     let buyer = Pubkey::new_unique();
     let mint = Pubkey::new_unique();
     // On-chain task is private
-    let account_data = encode_task_state(&buyer, &mint, PRICE, 0 /* Pending */, 9_999_999_999, true);
+    let account_data = encode_task_state(
+        &buyer,
+        &mint,
+        PRICE,
+        0, /* Pending */
+        9_999_999_999,
+        true,
+    );
     let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &account_data);
 
     let mut state = state_with_fake_chain(json!({"data": [encoded, "base64"]})).await;
@@ -322,7 +468,8 @@ async fn payment_quote_includes_private_flag() {
         .uri(format!("/tasks/{TASK_ID}"))
         .header("content-type", "application/json")
         .body(Body::from(
-            json!({"buyer": buyer.to_string(), "input": {"job": "resize"}, "is_private": true}).to_string(),
+            json!({"buyer": buyer.to_string(), "input": {"job": "resize"}, "is_private": true})
+                .to_string(),
         ))
         .unwrap();
 
@@ -340,7 +487,14 @@ async fn blind_sign_rejects_non_private_tasks() {
     let buyer = Pubkey::new_unique();
     let mint = Pubkey::new_unique();
     // Public task (is_private = false)
-    let account_data = encode_task_state(&buyer, &mint, PRICE, 0 /* Pending */, 9_999_999_999, false);
+    let account_data = encode_task_state(
+        &buyer,
+        &mint,
+        PRICE,
+        0, /* Pending */
+        9_999_999_999,
+        false,
+    );
     let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &account_data);
 
     let mut state = state_with_fake_chain(json!({"data": [encoded, "base64"]})).await;
@@ -360,7 +514,8 @@ async fn blind_sign_rejects_non_private_tasks() {
                 "buyer": buyer.to_string(),
                 "task_id": TASK_ID,
                 "blinded_point": blinded_point
-            }).to_string(),
+            })
+            .to_string(),
         ))
         .unwrap();
 
@@ -368,7 +523,10 @@ async fn blind_sign_rejects_non_private_tasks() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let body = body_json(response).await;
-    assert!(body["error"].as_str().unwrap().contains("is_private = true"));
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("is_private = true"));
 }
 
 #[tokio::test]
@@ -385,7 +543,8 @@ async fn blind_sign_rejects_invalid_hex_encoding() {
                 "buyer": Pubkey::new_unique().to_string(),
                 "task_id": 123,
                 "blinded_point": "invalid_hex"
-            }).to_string(),
+            })
+            .to_string(),
         ))
         .unwrap();
 
@@ -406,7 +565,8 @@ async fn blind_sign_rejects_invalid_point_length() {
             json!({
                 "buyer": Pubkey::new_unique().to_string(),
                 "task_id": 123,                "blinded_point": "1234" // Too short
-            }).to_string(),
+            })
+            .to_string(),
         ))
         .unwrap();
 
@@ -427,7 +587,14 @@ async fn blind_sign_returns_k_b_and_survives_the_blind_unblind_cycle() {
     let buyer = Pubkey::new_unique();
     let mint = Pubkey::new_unique();
     // Private, Pending, fully funded, deadline far in the future.
-    let account_data = encode_task_state(&buyer, &mint, PRICE, 0 /* Pending */, 9_999_999_999, true);
+    let account_data = encode_task_state(
+        &buyer,
+        &mint,
+        PRICE,
+        0, /* Pending */
+        9_999_999_999,
+        true,
+    );
     let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &account_data);
 
     let mut state = state_with_fake_chain(json!({"data": [encoded, "base64"]})).await;
@@ -483,12 +650,20 @@ async fn blind_sign_returns_k_b_and_survives_the_blind_unblind_cycle() {
         .unwrap()
         .decompress()
         .expect("blind signature must be a valid Ristretto encoding");
-    assert_eq!(c_point, secret * b_point, "blind signature must be exactly C = k·B");
+    assert_eq!(
+        c_point,
+        secret * b_point,
+        "blind signature must be exactly C = k·B"
+    );
 
     // Buyer unblinds: S = r⁻¹·C = k·h·G = h·K, which is what the verifier
     // checks knowing only h and the mint's public key.
     let s_point = c_point * r.invert();
-    assert_eq!(s_point, h * k_point, "unblinded signature must satisfy S = h·K");
+    assert_eq!(
+        s_point,
+        h * k_point,
+        "unblinded signature must satisfy S = h·K"
+    );
 
     // A deterministic mint (no per-request randomness) must sign the same
     // blinded point identically, or buyers can never agree on the voucher.
@@ -497,7 +672,6 @@ async fn blind_sign_returns_k_b_and_survives_the_blind_unblind_cycle() {
     let repeat_body = body_json(repeat).await;
     assert_eq!(repeat_body["blind_signature"].as_str().unwrap(), signature);
 }
-
 
 // Phase 3: Test nullifier endpoint
 #[tokio::test]
@@ -512,7 +686,8 @@ async fn nullify_rejects_invalid_length() {
         .body(Body::from(
             json!({
                 "nullifier": "1234" // Should be 64 characters
-            }).to_string(),
+            })
+            .to_string(),
         ))
         .unwrap();
 
@@ -535,7 +710,8 @@ async fn nullify_accepts_valid_format() {
         .body(Body::from(
             json!({
                 "nullifier": valid_nullifier
-            }).to_string(),
+            })
+            .to_string(),
         ))
         .unwrap();
 
@@ -565,8 +741,7 @@ async fn payment_quote_pdas_match_local_derivation() {
     assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
 
     let body = body_json(response).await;
-    let (expected_task_state, _) =
-        seller_server::pda::task_state_pda(&program_id, &buyer, TASK_ID);
+    let (expected_task_state, _) = seller_server::pda::task_state_pda(&program_id, &buyer, TASK_ID);
     let (expected_vault, _) = seller_server::pda::vault_pda(&program_id, &expected_task_state);
     assert_eq!(body["task_state_pda"], expected_task_state.to_string());
     assert_eq!(body["vault_pda"], expected_vault.to_string());
@@ -587,9 +762,7 @@ async fn payment_quote_pdas_differ_per_task_id() {
                 .method("POST")
                 .uri(format!("/tasks/{task_id}"))
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({"buyer": buyer, "input": {}}).to_string(),
-                ))
+                .body(Body::from(json!({"buyer": buyer, "input": {}}).to_string()))
                 .unwrap();
             let response = router.oneshot(req).await.unwrap();
             assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
@@ -649,7 +822,14 @@ async fn rejects_mismatch_when_chain_is_public_but_request_is_private() {
     let buyer = Pubkey::new_unique();
     let mint = Pubkey::new_unique();
     // On-chain task is PUBLIC.
-    let account_data = encode_task_state(&buyer, &mint, PRICE, 0 /* Pending */, 9_999_999_999, false);
+    let account_data = encode_task_state(
+        &buyer,
+        &mint,
+        PRICE,
+        0, /* Pending */
+        9_999_999_999,
+        false,
+    );
     let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &account_data);
 
     let mut state = state_with_fake_chain(json!({"data": [encoded, "base64"]})).await;
@@ -677,7 +857,14 @@ async fn rejects_mismatch_when_chain_is_public_but_request_is_private() {
 async fn results_are_isolated_per_task_id() {
     let buyer = Pubkey::new_unique();
     let mint = Pubkey::new_unique();
-    let account_data = encode_task_state(&buyer, &mint, PRICE, 0 /* Pending */, 9_999_999_999, false);
+    let account_data = encode_task_state(
+        &buyer,
+        &mint,
+        PRICE,
+        0, /* Pending */
+        9_999_999_999,
+        false,
+    );
     let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &account_data);
 
     let mut state = state_with_fake_chain(json!({"data": [encoded, "base64"]})).await;
@@ -710,12 +897,18 @@ async fn results_are_isolated_per_task_id() {
     let r11 = fetch(router.clone(), 11).await;
     assert_eq!(r11.status(), StatusCode::OK);
     let b11 = body_json(r11).await;
-    assert_eq!(b11["output_hash"], seller_server::execute::execute_task(&json!({"job": "a"})));
+    assert_eq!(
+        b11["output_hash"],
+        seller_server::execute::execute_task(&json!({"job": "a"}))
+    );
 
     let r12 = fetch(router.clone(), 12).await;
     assert_eq!(r12.status(), StatusCode::OK);
     let b12 = body_json(r12).await;
-    assert_eq!(b12["output_hash"], seller_server::execute::execute_task(&json!({"job": "b"})));
+    assert_eq!(
+        b12["output_hash"],
+        seller_server::execute::execute_task(&json!({"job": "b"}))
+    );
     assert_ne!(b11["output_hash"], b12["output_hash"]);
 
     let r13 = fetch(router, 13).await;
@@ -727,7 +920,10 @@ async fn hash_matches_fixed_reference_vector() {
     // sha256("{\"a\":1}") computed outside this crate (sha256sum), so any
     // drift in canonicalization vs the TypeScript verifier breaks this test.
     let expected = "015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862";
-    assert_eq!(seller_server::execute::execute_task(&json!({"a": 1})), expected);
+    assert_eq!(
+        seller_server::execute::execute_task(&json!({"a": 1})),
+        expected
+    );
 }
 
 #[tokio::test]
@@ -741,7 +937,8 @@ async fn rejects_execution_after_deadline_with_410() {
         .as_secs()
         .try_into()
         .unwrap();
-    let account_data = encode_task_state(&buyer, &mint, PRICE, 0 /* Pending */, now - 10, false);
+    let account_data =
+        encode_task_state(&buyer, &mint, PRICE, 0 /* Pending */, now - 10, false);
     let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &account_data);
 
     let mut state = state_with_fake_chain(json!({"data": [encoded, "base64"]})).await;
@@ -781,7 +978,14 @@ async fn executes_normally_while_deadline_is_in_the_future() {
         .as_secs()
         .try_into()
         .unwrap();
-    let account_data = encode_task_state(&buyer, &mint, PRICE, 0 /* Pending */, now + 3600, false);
+    let account_data = encode_task_state(
+        &buyer,
+        &mint,
+        PRICE,
+        0, /* Pending */
+        now + 3600,
+        false,
+    );
     let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &account_data);
 
     let mut state = state_with_fake_chain(json!({"data": [encoded, "base64"]})).await;

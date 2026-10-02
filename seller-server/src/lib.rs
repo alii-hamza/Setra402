@@ -2,6 +2,7 @@ pub mod config;
 pub mod execute;
 pub mod handlers;
 pub mod pda;
+pub mod registry;
 pub mod rpc;
 pub mod task_state;
 
@@ -15,6 +16,8 @@ use config::AppState;
 /// the route table.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        .route("/services", get(handlers::list_services))
+        .route("/services/:service_id", get(handlers::get_service))
         .route("/tasks/:task_id", post(handlers::handle_task))
         .route("/tasks/:task_id/result", get(handlers::get_result))
         // Phase 3 Cryptographic Endpoints

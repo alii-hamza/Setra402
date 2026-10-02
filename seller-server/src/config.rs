@@ -43,6 +43,13 @@ pub struct AppState {
 pub struct TaskResult {
     pub input: serde_json::Value,
     pub output_hash: String,
+    pub version: String,
+    pub task_id: String,
+    pub service_id: String,
+    pub result: serde_json::Value,
+    pub result_hash: String,
+    pub evidence: Vec<serde_json::Value>,
+    pub completed_at_unix: i64,
 }
 
 #[derive(Deserialize, Debug)]
@@ -51,6 +58,12 @@ pub struct TaskRequest {
     pub input: serde_json::Value,
     #[serde(default)]
     pub is_private: bool,
+    #[serde(default = "default_service_id")]
+    pub service_id: String,
+}
+
+fn default_service_id() -> String {
+    "legacy-rest".to_string()
 }
 
 #[derive(Serialize, Debug)]
@@ -66,6 +79,9 @@ pub struct PaymentQuote {
     pub timeout_seconds: i64,
     pub is_private: bool,
     pub protocol_fee_bps: u64,
+    pub service_id: String,
+    pub verification_policy: serde_json::Value,
+    pub policy_hash: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -110,8 +126,8 @@ impl AppState {
             .and_then(|raw| Pubkey::from_str(&raw).ok());
 
         // Phase 3: Redis connection
-        let redis_url = std::env::var("REDIS_URL")
-            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
         let redis_client = RedisClient::open(redis_url.as_str())
             .map_err(|e| ConfigError::Invalid("REDIS_URL", e.to_string()))?;
 

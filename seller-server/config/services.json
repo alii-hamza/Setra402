@@ -1,0 +1,56 @@
+[
+  {
+    "id": "legacy-rest",
+    "name": "Legacy REST Compatibility",
+    "capability": "setra402.task.echo",
+    "price_base_units": "1500000",
+    "timeout_seconds": 30,
+    "verification_policy": {
+      "version": "1",
+      "level": 1,
+      "checks": [
+        {
+          "type": "json_schema",
+          "schema_ref": "generic-object-v1"
+        }
+      ]
+    }
+  },
+  {
+    "id": "lead-scraper-demo",
+    "name": "Lead Scraper Demo",
+    "capability": "web.scrape.leads",
+    "price_base_units": "1500000",
+    "timeout_seconds": 30,
+    "verification_policy": {
+      "version": "1",
+      "level": 1,
+      "checks": [
+        {
+          "type": "json_schema",
+          "schema_ref": "lead-list-v1"
+        },
+        {
+          "type": "record_count",
+          "pointer": "/records",
+          "min": 20
+        },
+        {
+          "type": "required_fields",
+          "pointer": "/records",
+          "fields": ["name", "company", "email"]
+        },
+        {
+          "type": "unique",
+          "pointer": "/records",
+          "field": "email"
+        },
+        {
+          "type": "freshness",
+          "timestamp_pointer": "/generated_at_unix",
+          "max_age_seconds": 3600
+        }
+      ]
+    }
+  }
+]

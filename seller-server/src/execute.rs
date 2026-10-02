@@ -14,17 +14,24 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-pub fn execute_task(input: &Value) -> String {
+pub fn canonical_json(value: &Value) -> Result<String, &'static str> {
     // Reject floating-point numbers to prevent cross-language hash mismatches
     // (Rust serde_json vs JavaScript JSON.stringify handle floats differently)
-    if contains_floats(input) {
-        panic!("floating-point numbers not supported in task input");
+    if contains_floats(value) {
+        return Err("floating-point numbers not supported in committed JSON");
     }
-    
-    let canonical = serde_json::to_string(input).expect("Value serialization cannot fail");
+    serde_json::to_string(value).map_err(|_| "JSON serialization failed")
+}
+
+pub fn hash_canonical(value: &Value) -> Result<String, &'static str> {
+    let canonical = canonical_json(value)?;
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
-    hex::encode(hasher.finalize())
+    Ok(hex::encode(hasher.finalize()))
+}
+
+pub fn execute_task(input: &Value) -> String {
+    hash_canonical(input).unwrap_or_else(|error| panic!("{error}"))
 }
 
 fn contains_floats(value: &Value) -> bool {

@@ -6,9 +6,10 @@
 //! claims.
 
 use crate::config::{AppState, PaymentQuote, TaskRequest, TaskResult, PROTOCOL_FEE_BPS};
-use crate::execute::execute_task;
+use crate::execute::{execute_task, hash_canonical};
 use crate::pda::{task_state_pda, vault_pda};
-use crate::task_state::{TaskStatus, try_from_account_data};
+use crate::registry::{find_service, policy_hash, services, ServiceDefinition};
+use crate::task_state::{try_from_account_data, TaskStatus};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -34,7 +35,13 @@ fn internal_error(msg: &str) -> ApiError {
     )
 }
 
-fn payment_required(state: &AppState, task_id: u64, task_state_addr: &Pubkey, is_private: bool) -> ApiError {
+fn payment_required(
+    state: &AppState,
+    task_id: u64,
+    task_state_addr: &Pubkey,
+    is_private: bool,
+    service: &ServiceDefinition,
+) -> ApiError {
     let (vault, _bump) = vault_pda(&state.program_id, task_state_addr);
     let quote = PaymentQuote {
         task_id,
@@ -48,6 +55,9 @@ fn payment_required(state: &AppState, task_id: u64, task_state_addr: &Pubkey, is
         timeout_seconds: state.timeout_seconds,
         is_private,
         protocol_fee_bps: PROTOCOL_FEE_BPS,
+        service_id: service.id.clone(),
+        verification_policy: service.verification_policy.clone(),
+        policy_hash: policy_hash(service),
     };
     (
         StatusCode::PAYMENT_REQUIRED,
@@ -55,11 +65,25 @@ fn payment_required(state: &AppState, task_id: u64, task_state_addr: &Pubkey, is
     )
 }
 
+pub async fn list_services() -> Json<Vec<ServiceDefinition>> {
+    Json(services().to_vec())
+}
+
+pub async fn get_service(
+    Path(service_id): Path<String>,
+) -> Result<Json<ServiceDefinition>, StatusCode> {
+    find_service(&service_id)
+        .cloned()
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
 pub async fn handle_task(
     State(state): State<AppState>,
     Path(task_id): Path<u64>,
     Json(req): Json<TaskRequest>,
 ) -> Result<Json<TaskResult>, ApiError> {
+    let service = find_service(&req.service_id).ok_or_else(|| bad_request("unknown service_id"))?;
     let buyer =
         Pubkey::from_str(&req.buyer).map_err(|_| bad_request("buyer is not a valid pubkey"))?;
 
@@ -72,7 +96,15 @@ pub async fn handle_task(
         .map_err(|e| internal_error(&format!("RPC error: {e}")))?;
 
     let task_state = match account_data {
-        None => return Err(payment_required(&state, task_id, &task_state_addr, req.is_private)),
+        None => {
+            return Err(payment_required(
+                &state,
+                task_id,
+                &task_state_addr,
+                req.is_private,
+                service,
+            ))
+        }
         Some(data) => try_from_account_data(&data)
             .map_err(|e| internal_error(&format!("corrupt task account: {e}")))?,
     };
@@ -96,7 +128,13 @@ pub async fn handle_task(
     }
 
     if task_state.amount < state.price || task_state.mint != state.mint {
-        return Err(payment_required(&state, task_id, &task_state_addr, task_state.is_private));
+        return Err(payment_required(
+            &state,
+            task_id,
+            &task_state_addr,
+            task_state.is_private,
+            service,
+        ));
     }
 
     // Mirrors the on-chain refund boundary exactly (`refund_task` succeeds
@@ -119,9 +157,35 @@ pub async fn handle_task(
     }
 
     let output_hash = execute_task(&req.input);
+    let completed_at_unix = now;
+    let result_value = if service.id == "lead-scraper-demo" {
+        let records: Vec<Value> = (1..=20)
+            .map(|index| {
+                json!({
+                    "name": format!("Lead {index}"),
+                    "company": format!("Company {index}"),
+                    "email": format!("lead{index}@fixture.local")
+                })
+            })
+            .collect();
+        json!({
+            "records": records,
+            "generated_at_unix": completed_at_unix
+        })
+    } else {
+        req.input.clone()
+    };
+    let result_hash = hash_canonical(&result_value).map_err(|message| bad_request(message))?;
     let result = TaskResult {
         input: req.input,
         output_hash,
+        version: "1".to_string(),
+        task_id: task_id.to_string(),
+        service_id: service.id.clone(),
+        result: result_value,
+        result_hash,
+        evidence: Vec::new(),
+        completed_at_unix,
     };
     state
         .results
@@ -157,7 +221,7 @@ pub struct BlindSignRequest {
 #[derive(Serialize, Debug)]
 pub struct BlindSignResponse {
     pub blind_signature: String, // 32-byte hex-encoded point C
-    pub mint_pubkey: String,      // 32-byte hex-encoded point K
+    pub mint_pubkey: String,     // 32-byte hex-encoded point K
 }
 
 pub async fn handle_blind_sign(
@@ -185,17 +249,27 @@ pub async fn handle_blind_sign(
         .map_err(|e| internal_error(&format!("RPC error: {e}")))?;
 
     let task_state = match account_data {
-        None => return Err((StatusCode::PAYMENT_REQUIRED, Json(json!({"error": "Escrow account not found"})))),
+        None => {
+            return Err((
+                StatusCode::PAYMENT_REQUIRED,
+                Json(json!({"error": "Escrow account not found"})),
+            ))
+        }
         Some(data) => try_from_account_data(&data)
             .map_err(|e| internal_error(&format!("Corrupt task state: {e}")))?,
     };
 
     if task_state.status != TaskStatus::Pending {
-        return Err((StatusCode::CONFLICT, Json(json!({"error": "Task is not pending"}))));
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "Task is not pending"})),
+        ));
     }
 
     if !task_state.is_private {
-        return Err(bad_request("Task was not initialized with is_private = true"));
+        return Err(bad_request(
+            "Task was not initialized with is_private = true",
+        ));
     }
 
     // Compute blind signature: C = k * B
@@ -218,7 +292,9 @@ pub async fn handle_nullify(
     Json(req): Json<NullifyRequest>,
 ) -> Result<Json<Value>, ApiError> {
     if req.nullifier.len() != 64 {
-        return Err(bad_request("Nullifier must be a 32-byte hex string (64 characters)"));
+        return Err(bad_request(
+            "Nullifier must be a 32-byte hex string (64 characters)",
+        ));
     }
 
     let mut conn = state
