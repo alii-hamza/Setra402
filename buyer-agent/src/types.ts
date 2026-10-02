@@ -154,6 +154,23 @@ export interface SolanaAccountCheckV1 {
   expected_owner?: string;
 }
 
+export interface SourceSamplingCheckV1 {
+  type: "source_sampling";
+  pointer: string;
+  sample_count: number;
+  source_url_field: string;
+  fields: string[];
+  allowed_domains: string[];
+  minimum_match_bps: number;
+}
+
+export interface TestSuiteCheckV1 {
+  type: "test_suite";
+  runner_profile: string;
+  test_bundle_hash: string;
+  timeout_seconds: number;
+}
+
 export type VerificationCheckV1 =
   | JsonSchemaCheckV1
   | RecordCountCheckV1
@@ -162,11 +179,13 @@ export type VerificationCheckV1 =
   | FreshnessCheckV1
   | ArtifactIntegrityCheckV1
   | SolanaTransactionCheckV1
-  | SolanaAccountCheckV1;
+  | SolanaAccountCheckV1
+  | SourceSamplingCheckV1
+  | TestSuiteCheckV1;
 
 export interface VerificationPolicyV1 {
   version: "1";
-  level: 1;
+  level: 1 | 2;
   checks: readonly VerificationCheckV1[];
 }
 
@@ -180,7 +199,7 @@ export interface VerificationCheckResult {
 export interface VerificationReport {
   taskId: string;
   serviceId: string;
-  level: 1;
+  level: 1 | 2;
   manifestHash: string;
   policyHash: string;
   resultHash: string;

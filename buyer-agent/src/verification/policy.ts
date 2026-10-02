@@ -12,6 +12,43 @@ const hash = z.string().regex(/^[0-9a-f]{64}$/);
 
 const checkSchema = z.union([
   z
+    .object({
+      type: z.literal("source_sampling"),
+      pointer,
+      sample_count: positive.max(100),
+      source_url_field: z.string().min(1).max(100),
+      fields: z
+        .array(z.string().min(1).max(100))
+        .min(1)
+        .max(100)
+        .refine((v) => new Set(v).size === v.length),
+      allowed_domains: z
+        .array(
+          z
+            .string()
+            .max(253)
+            .regex(
+              /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
+            )
+        )
+        .min(1)
+        .max(100),
+      minimum_match_bps: positive.max(10_000),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("test_suite"),
+      runner_profile: z
+        .string()
+        .min(1)
+        .max(100)
+        .regex(/^[a-z0-9][a-z0-9-]*$/),
+      test_bundle_hash: hash,
+      timeout_seconds: positive.max(300),
+    })
+    .strict(),
+  z
     .object({ type: z.literal("json_schema"), schema_ref: z.string().min(1) })
     .strict(),
   z
@@ -105,10 +142,21 @@ const checkSchema = z.union([
 const policySchema = z
   .object({
     version: z.literal("1"),
-    level: z.literal(1),
-    checks: z.array(checkSchema).min(1),
+    level: z.union([z.literal(1), z.literal(2)]),
+    checks: z.array(checkSchema).min(1).max(100),
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) =>
+      value.level === 2
+        ? value.checks.some(
+            (c) => c.type === "source_sampling" || c.type === "test_suite"
+          )
+        : value.checks.every(
+            (c) => c.type !== "source_sampling" && c.type !== "test_suite"
+          ),
+    { message: "policy level must match its mandatory checks" }
+  );
 
 export function parseVerificationPolicy(value: unknown): VerificationPolicyV1 {
   return policySchema.parse(value) as VerificationPolicyV1;

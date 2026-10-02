@@ -9,6 +9,8 @@ import type {
 import { VerificationEngine, type VerificationContext } from "./engine.js";
 import type { LoadedArtifact } from "./level1/artifact-integrity.js";
 import type { SolanaStateReader } from "./level1/solana-state.js";
+import type { SourceContext } from "./level2/source-sampling.js";
+import type { TestSuiteContext } from "./level2/test-suite.js";
 
 export interface VerificationChain {
   verifier: PublicKey;
@@ -25,7 +27,11 @@ export class VerificationCoordinator {
     private readonly loadArtifact: (
       id: string,
       maxBytes: number
-    ) => Promise<LoadedArtifact | null> = async () => null
+    ) => Promise<LoadedArtifact | null> = async () => null,
+    private readonly level2: {
+      source?: SourceContext;
+      tests?: TestSuiteContext;
+    } = {}
   ) {}
 
   async verify(
@@ -41,6 +47,7 @@ export class VerificationCoordinator {
       schemas: this.schemas,
       loadArtifact: this.loadArtifact,
       solana: this.solana,
+      ...this.level2,
       verifyManifestCommitment: async (manifestHash) => {
         if (!record.initializeSignature)
           throw new Error("initialize transaction signature is missing");

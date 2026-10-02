@@ -187,7 +187,10 @@ export class SettlementCoordinator {
       throw new VerificationFailed(
         "settlement requires a passing VerificationReport"
       );
-    if (report.level !== 1)
+    if (
+      (report.level !== 1 && report.level !== 2) ||
+      report.level !== quote.verificationPolicy.level
+    )
       throw new VerificationFailed("settlement report level is unsupported");
     if (report.taskId !== quote.taskId.toString())
       throw new VerificationFailed("settlement report taskId mismatch");

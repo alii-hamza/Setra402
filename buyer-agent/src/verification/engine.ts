@@ -25,6 +25,12 @@ import {
 import { checkUnique } from "./level1/unique.js";
 import { parseVerificationPolicy } from "./policy.js";
 import { parseResultEnvelope, parseTaskManifest } from "./contracts.js";
+import { canonicalize } from "../manifest/canonicalize.js";
+import {
+  checkSourceSampling,
+  type SourceContext,
+} from "./level2/source-sampling.js";
+import { checkTestSuite, type TestSuiteContext } from "./level2/test-suite.js";
 
 export interface VerificationContext
   extends JsonSchemaContext,
@@ -34,6 +40,8 @@ export interface VerificationContext
   nowUnix: number;
   verifyManifestCommitment(manifestHash: string): Promise<void>;
   solana: SolanaStateReader;
+  source?: SourceContext;
+  tests?: TestSuiteContext;
 }
 
 function safeHash(value: unknown): string | null {
@@ -74,6 +82,17 @@ export class VerificationEngine {
     result: ResultEnvelopeV1,
     context: VerificationContext
   ): Promise<VerificationReport> {
+    // Snapshot before the first await. Result commitments and later independent
+    // checks must refer to the same immutable bytes even if a caller mutates.
+    try {
+      manifest = JSON.parse(canonicalize(manifest)) as TaskManifestV1;
+      policyInput = JSON.parse(
+        canonicalize(policyInput)
+      ) as VerificationPolicyV1;
+      result = JSON.parse(canonicalize(result)) as ResultEnvelopeV1;
+    } catch {
+      /* Strict schemas/hash checks below fail closed. */
+    }
     const startedAtUnix = context.nowUnix;
     const checks: VerificationCheckResult[] = [];
     const manifestHash = safeHash(manifest) ?? "";
@@ -163,7 +182,7 @@ export class VerificationEngine {
       envelopeCheck.passed &&
       resultMatches;
     if (integrityPassed && policy) {
-      for (const check of policy.checks) {
+      for (const [checkIndex, check] of policy.checks.entries()) {
         switch (check.type) {
           case "json_schema":
             checks.push(await checkJsonSchema(check, result.result, context));
@@ -188,6 +207,31 @@ export class VerificationEngine {
           case "solana_state":
             checks.push(await checkSolanaState(check, context.solana));
             break;
+          case "source_sampling":
+            checks.push(
+              await checkSourceSampling(
+                check,
+                result.result,
+                hashCanonical({
+                  manifestHash,
+                  policyHash,
+                  resultHash,
+                  checkIndex,
+                }),
+                context.source
+              )
+            );
+            break;
+          case "test_suite":
+            checks.push(
+              await checkTestSuite(
+                check,
+                result.evidence,
+                context.tests,
+                result.result
+              )
+            );
+            break;
         }
       }
     }
@@ -195,7 +239,7 @@ export class VerificationEngine {
     return {
       taskId: manifest.taskId,
       serviceId: manifest.serviceId,
-      level: 1,
+      level: policy?.level ?? 1,
       manifestHash,
       policyHash,
       resultHash,
