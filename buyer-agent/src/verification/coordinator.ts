@@ -23,7 +23,8 @@ export class VerificationCoordinator {
     private readonly schemas: ReadonlyMap<string, unknown>,
     private readonly solana: SolanaStateReader,
     private readonly loadArtifact: (
-      id: string
+      id: string,
+      maxBytes: number
     ) => Promise<LoadedArtifact | null> = async () => null
   ) {}
 

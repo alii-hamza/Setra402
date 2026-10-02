@@ -13,7 +13,7 @@ export interface LoadedArtifact {
 }
 
 export interface ArtifactContext {
-  loadArtifact(id: string): Promise<LoadedArtifact | null>;
+  loadArtifact(id: string, maxBytes: number): Promise<LoadedArtifact | null>;
 }
 
 function artifactEvidence(
@@ -36,7 +36,10 @@ export async function checkArtifactIntegrity(
   if (!claimed) return fail(policy.type, "artifact evidence is missing");
   if (!/^[0-9a-f]{64}$/.test(claimed.content_hash))
     return fail(policy.type, "artifact evidence hash is malformed");
-  const artifact = await context.loadArtifact(policy.evidence_id);
+  const artifact = await context.loadArtifact(
+    policy.evidence_id,
+    policy.max_size_bytes
+  );
   if (!artifact) return fail(policy.type, "artifact does not exist");
   if (artifact.bytes.byteLength > policy.max_size_bytes)
     return fail(policy.type, "artifact exceeds committed size limit");

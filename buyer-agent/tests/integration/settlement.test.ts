@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import {
+  InvalidQuote,
   ReplayDetected,
   SettlementTooCloseToDeadline,
   TransactionSubmissionError,
@@ -197,6 +198,21 @@ describe("settlement coordination", () => {
       })
     ).rejects.toBeInstanceOf(SettlementTooCloseToDeadline);
     expect(calls).toEqual(["fetch"]);
+  });
+
+  it("validates verifier identity against the on-chain TaskState", async () => {
+    const wrongVerifierState = {
+      ...pending(),
+      verifier: Keypair.generate().publicKey.toBase58(),
+    };
+    const { chain, calls } = fakeChain(wrongVerifierState);
+    await expect(
+      new SettlementCoordinator(chain, 5).settle(quote, record, {
+        report: passingReport(),
+        nowUnix: 100,
+      })
+    ).rejects.toBeInstanceOf(InvalidQuote);
+    expect(calls.includes("settlePublic")).toBe(false);
   });
 
   it("uses the on-chain clock for the settlement safety margin", async () => {

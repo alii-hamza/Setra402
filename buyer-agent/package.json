@@ -10,7 +10,7 @@
     "test:integration": "vitest run tests/integration",
     "test:e2e": "vitest run tests/e2e",
     "test:rest": "vitest run tests/integration/rest-x402.test.ts tests/e2e/rest-flow.test.ts",
-    "test:l1": "vitest run tests/unit/verification-level1.test.ts tests/unit/verification-engine.test.ts tests/unit/canonical-vectors.test.ts tests/integration/verification-settlement.test.ts",
+    "test:l1": "vitest run tests/unit/verification-level1.test.ts tests/unit/verification-engine.test.ts tests/unit/canonical-vectors.test.ts tests/unit/artifact-loader.test.ts tests/integration/verification-settlement.test.ts",
     "test:privacy": "vitest run tests/e2e/rest-flow.test.ts -t \"preserves private settlement\"",
     "test:all": "npm run build && npm run test:unit && npm run test:integration && npm run test:e2e"
   },
