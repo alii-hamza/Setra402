@@ -1,7 +1,7 @@
 import { Program, AnchorProvider, Wallet, type Idl } from "@coral-xyz/anchor";
 import BN from "bn.js";
 import bs58 from "bs58";
-import { getAccount, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { getAccount, TOKEN_PROGRAM_ID, unpackAccount } from "@solana/spl-token";
 import {
   Connection,
   Keypair,
@@ -23,6 +23,11 @@ import {
   FinancialJournal,
   type PreparedTransaction,
 } from "./financial-journal.js";
+import {
+  FinancialReconciler,
+  type FinancialRecoveryRequest,
+  type FinancialReconciliationResult,
+} from "./financial-reconciliation.js";
 
 function statusName(status: unknown): TaskStatus {
   if (!status || typeof status !== "object")
@@ -265,6 +270,146 @@ export class ChainClient implements EscrowChain {
   async fetchNullifierRecord(nullifier: Uint8Array): Promise<unknown | null> {
     const [address] = deriveNullifierPda(this.options.programId, nullifier);
     return (this.program.account as any).nullifierRecord.fetchNullable(address);
+  }
+
+  /** Read-only reconciliation entry point. No signer or transaction sender is invoked. */
+  async reconcileFinancial(
+    request: FinancialRecoveryRequest
+  ): Promise<FinancialReconciliationResult> {
+    const connection = this.options.connection;
+    const transactions =
+      this.options.transactionDirectory ??
+      resolve(process.env.SETRA_STATE_DIR ?? ".setra-state", "transactions");
+    return new FinancialReconciler(transactions, {
+      snapshot: async (input, minimumSlot) => {
+        const options = {
+          commitment: "confirmed" as const,
+          ...(minimumSlot === undefined ? {} : { minContextSlot: minimumSlot }),
+        };
+        const taskAddress = new PublicKey(input.quote.taskStatePda);
+        const vaultAddress = new PublicKey(input.quote.vaultPda);
+        const task = await this.fetchTaskEvidence(taskAddress, minimumSlot);
+        const vaultResponse = await connection.getAccountInfoAndContext(
+          vaultAddress,
+          options
+        );
+        const clockResponse = await connection.getAccountInfoAndContext(
+          SYSVAR_CLOCK_PUBKEY,
+          options
+        );
+        if (!clockResponse.value || clockResponse.value.data.length < 40)
+          throw new Error("Solana Clock unavailable");
+        const clockUnix = Number(clockResponse.value.data.readBigInt64LE(32));
+        if (!Number.isSafeInteger(clockUnix))
+          throw new Error("Solana Clock outside safe range");
+        let nullifierRecord: { taskId: bigint; nullifierHex: string } | null =
+          null;
+        let nullifierSlot = Number.MAX_SAFE_INTEGER;
+        if (
+          input.quote.isPrivate &&
+          input.operation.kind === "settlement" &&
+          input.nullifier
+        ) {
+          const [address] = deriveNullifierPda(
+            this.options.programId,
+            input.nullifier
+          );
+          const response = await connection.getAccountInfoAndContext(
+            address,
+            options
+          );
+          nullifierSlot = response.context.slot;
+          if (response.value) {
+            if (!response.value.owner.equals(this.options.programId))
+              throw new Error("NullifierRecord account owner mismatch");
+            const decoded = this.program.coder.accounts.decode<any>(
+              "nullifierRecord",
+              response.value.data
+            );
+            nullifierRecord = {
+              taskId: bigintValue(decoded.taskId),
+              nullifierHex: Buffer.from(decoded.nullifier).toString("hex"),
+            };
+          }
+        }
+        const vault = vaultResponse.value
+          ? (() => {
+              if (!vaultResponse.value!.owner.equals(TOKEN_PROGRAM_ID))
+                throw new Error("vault token account owner mismatch");
+              const account = unpackAccount(
+                vaultAddress,
+                vaultResponse.value!,
+                TOKEN_PROGRAM_ID
+              );
+              return {
+                amount: account.amount,
+                mint: account.mint.toBase58(),
+                owner: account.owner.toBase58(),
+              };
+            })()
+          : null;
+        const slot = Math.min(
+          task.slot,
+          vaultResponse.context.slot,
+          clockResponse.context.slot,
+          nullifierSlot
+        );
+        if (minimumSlot !== undefined && slot < minimumSlot)
+          throw new Error(
+            "authoritative recovery snapshot is older than finalized fence"
+          );
+        return {
+          slot,
+          taskState: task.state,
+          vault,
+          clockUnix,
+          nullifierRecord,
+        };
+      },
+      signature: async (value) => {
+        const response = await connection.getSignatureStatus(value, {
+          searchTransactionHistory: true,
+        });
+        return {
+          contextSlot: response.context.slot,
+          confirmationStatus: response.value?.confirmationStatus ?? null,
+          err: response.value?.err ?? null,
+        };
+      },
+      fencedSignature: async (value, minimumSlot) => {
+        const response = await connection.getSignatureStatus(value, {
+          searchTransactionHistory: true,
+        });
+        if (response.context.slot < minimumSlot)
+          throw new Error("signature history is older than finalized fence");
+        return {
+          contextSlot: response.context.slot,
+          confirmationStatus: response.value?.confirmationStatus ?? null,
+          err: response.value?.err ?? null,
+        };
+      },
+      finalizedFence: async () => {
+        const slot = await connection.getSlot("finalized");
+        const block = await connection.getParsedBlock(slot, {
+          commitment: "finalized",
+          transactionDetails: "none",
+          rewards: false,
+          maxSupportedTransactionVersion: 0,
+        });
+        return { slot, blockHeight: block?.blockHeight ?? null };
+      },
+      manifestMemo: async (value, expectedHash) => {
+        try {
+          await this.verifyManifestMemo(value, expectedHash);
+          return "MATCH" as const;
+        } catch (error) {
+          return error instanceof ManifestMismatch &&
+            !/unavailable/i.test(error.message)
+            ? ("MISMATCH" as const)
+            : ("UNAVAILABLE" as const);
+        }
+      },
+    }).reconcile(request);
   }
 
   async resolveTokenAccountOwner(
