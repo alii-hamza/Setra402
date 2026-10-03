@@ -109,6 +109,18 @@ pub fn load_services(
 
 static SERVICES: OnceLock<Vec<ServiceDefinition>> = OnceLock::new();
 
+pub fn profile_recovery_capability(profile_id: &str) -> Option<&'static str> {
+    static PROFILES: OnceLock<Vec<Value>> = OnceLock::new();
+    PROFILES
+        .get_or_init(|| {
+            serde_json::from_str(include_str!("../config/provider-profiles.json"))
+                .expect("checked-in provider profiles")
+        })
+        .iter()
+        .find(|profile| profile["id"] == profile_id)
+        .and_then(|profile| profile["recovery_capability"].as_str())
+}
+
 pub fn services() -> &'static [ServiceDefinition] {
     SERVICES
         .get_or_init(|| {

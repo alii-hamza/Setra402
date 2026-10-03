@@ -41,6 +41,110 @@ async fn retry_post(
         .await
         .unwrap()
 }
+async fn evidence_get(state: AppState, buyer: Pubkey) -> axum::response::Response {
+    seller_server::build_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!("/tasks/7/execution-evidence?buyer={buyer}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+#[tokio::test]
+async fn provider_evidence_reports_durable_result_without_fabricating_external_ids() {
+    let (mut state, buyer) = retry_fixture().await;
+    let dir =
+        std::env::temp_dir().join(format!("setra-provider-evidence-{}", Pubkey::new_unique()));
+    state.execution_store = Some(dir.clone());
+    assert_eq!(
+        retry_post(state.clone(), buyer, json!({"x":1}), "legacy-rest")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    state.results.lock().unwrap().clear();
+    let response = evidence_get(state, buyer).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["record_state"], "RESULT_PERSISTED");
+    assert_eq!(body["recovery_capability"], "DURABLE_RESULT_REPLAY_ONLY");
+    assert_eq!(body["idempotency_key"], Value::Null);
+    assert_eq!(body["provider_execution_id"], Value::Null);
+    assert_eq!(body["status_query_supported"], false);
+    assert_eq!(body["durable_receipt_supported"], false);
+    assert_eq!(
+        body["input_hash"],
+        seller_server::execute::hash_canonical(&json!({"x":1})).unwrap()
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[tokio::test]
+async fn provider_evidence_keeps_orphan_intent_unknown_and_rejects_corruption() {
+    let (mut state, buyer) = retry_fixture().await;
+    let dir = std::env::temp_dir().join(format!("setra-provider-intent-{}", Pubkey::new_unique()));
+    let (pda, _) = seller_server::pda::task_state_pda(&state.program_id, &buyer, 7);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{pda}.intent"));
+    seller_server::execution_store::claim(&path, &"a".repeat(64), "legacy-rest").unwrap();
+    state.execution_store = Some(dir.clone());
+    let response = evidence_get(state.clone(), buyer).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_json(response).await["record_state"], "INTENT_ONLY");
+    std::fs::write(&path, b"{").unwrap();
+    assert_eq!(
+        evidence_get(state, buyer).await.status(),
+        StatusCode::CONFLICT
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[tokio::test]
+async fn provider_evidence_absence_and_disabled_store_never_claim_nonoccurrence() {
+    let (mut state, buyer) = retry_fixture().await;
+    let dir = std::env::temp_dir().join(format!("setra-provider-empty-{}", Pubkey::new_unique()));
+    std::fs::create_dir_all(&dir).unwrap();
+    state.execution_store = Some(dir.clone());
+    assert_eq!(
+        body_json(evidence_get(state.clone(), buyer).await).await["record_state"],
+        "NO_LOCAL_EVIDENCE"
+    );
+    state.execution_store = None;
+    assert_eq!(
+        body_json(evidence_get(state, buyer).await).await["record_state"],
+        "STORE_UNAVAILABLE"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[tokio::test]
+async fn provider_evidence_rejects_orphan_result_and_conflicting_immutable_input() {
+    let (mut state, buyer) = retry_fixture().await;
+    let dir =
+        std::env::temp_dir().join(format!("setra-provider-conflict-{}", Pubkey::new_unique()));
+    state.execution_store = Some(dir.clone());
+    assert_eq!(
+        retry_post(state.clone(), buyer, json!({"x":1}), "legacy-rest")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let (pda, _) = seller_server::pda::task_state_pda(&state.program_id, &buyer, 7);
+    let intent_path = dir.join(format!("{pda}.intent"));
+    let original = std::fs::read(&intent_path).unwrap();
+    std::fs::remove_file(&intent_path).unwrap();
+    assert_eq!(
+        evidence_get(state.clone(), buyer).await.status(),
+        StatusCode::CONFLICT
+    );
+    let mut altered: Value = serde_json::from_slice(&original).unwrap();
+    altered["input_hash"] = json!("b".repeat(64));
+    std::fs::write(&intent_path, altered.to_string()).unwrap();
+    assert_eq!(
+        evidence_get(state, buyer).await.status(),
+        StatusCode::CONFLICT
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
 #[tokio::test]
 async fn funded_retries_replay_identical_result() {
     let (state, buyer) = retry_fixture().await;

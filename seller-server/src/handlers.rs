@@ -8,7 +8,7 @@
 use crate::config::{AppState, PaymentQuote, TaskRequest, TaskResult, PROTOCOL_FEE_BPS};
 use crate::execute::hash_canonical;
 use crate::pda::{task_state_pda, vault_pda};
-use crate::registry::{load_services, policy_hash, ServiceDefinition};
+use crate::registry::{load_services, policy_hash, profile_recovery_capability, ServiceDefinition};
 use crate::task_state::{try_from_account_data, TaskStatus};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -378,6 +378,81 @@ pub async fn get_result(
         return Err(StatusCode::CONFLICT);
     }
     Ok(Json(result))
+}
+
+/// Durable seller-side evidence only. It never queries or dispatches a provider.
+/// An absent local record is not proof that an external effect did not occur.
+pub async fn get_execution_evidence(
+    State(state): State<AppState>,
+    Path(task_id): Path<u64>,
+    Query(query): Query<ResultQuery>,
+) -> Result<Json<Value>, StatusCode> {
+    let buyer_raw = query.buyer.ok_or(StatusCode::BAD_REQUEST)?;
+    let buyer = Pubkey::from_str(&buyer_raw).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let (pda, _) = task_state_pda(&state.program_id, &buyer, task_id);
+    let mut response = json!({
+        "version": "1",
+        "buyer": buyer.to_string(),
+        "task_id": task_id.to_string(),
+        "task_state_pda": pda.to_string(),
+        "record_state": "STORE_UNAVAILABLE",
+        "service_id": null,
+        "input_hash": null,
+        "result_hash": null,
+        "provider_connector_ref": null,
+        "recovery_capability": "NONE",
+        "profile_binding": "CURRENT_REGISTRY_ONLY",
+        "idempotency_key": null,
+        "provider_execution_id": null,
+        "status_query_supported": false,
+        "durable_receipt_supported": false
+    });
+    let Some(directory) = &state.execution_store else {
+        return Ok(Json(response));
+    };
+    let intent = crate::execution_store::load_intent(&directory.join(format!("{pda}.intent")))
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let result = crate::execution_store::load(&directory.join(format!("{pda}.json")))
+        .map_err(|_| StatusCode::CONFLICT)?;
+    if intent.is_none() && result.is_some() {
+        return Err(StatusCode::CONFLICT);
+    }
+    let Some(intent) = intent else {
+        response["record_state"] = json!("NO_LOCAL_EVIDENCE");
+        return Ok(Json(response));
+    };
+    if let Some(saved) = &result {
+        if saved.task_id != task_id.to_string()
+            || saved.service_id != intent.service_id
+            || saved.output_hash != intent.input_hash
+        {
+            return Err(StatusCode::CONFLICT);
+        }
+    }
+    let service = load_services(
+        state.registry_overlay.as_deref(),
+        state.price,
+        state.timeout_seconds,
+    )
+    .into_iter()
+    .find(|service| service.id == intent.service_id)
+    .ok_or(StatusCode::CONFLICT)?;
+    let capability =
+        profile_recovery_capability(&service.provider_connector_ref).ok_or(StatusCode::CONFLICT)?;
+    response["record_state"] = json!(if result.is_some() {
+        "RESULT_PERSISTED"
+    } else {
+        "INTENT_ONLY"
+    });
+    response["service_id"] = json!(intent.service_id);
+    response["input_hash"] = json!(intent.input_hash);
+    response["result_hash"] = result
+        .as_ref()
+        .map(|saved| json!(saved.result_hash))
+        .unwrap_or(Value::Null);
+    response["provider_connector_ref"] = json!(service.provider_connector_ref);
+    response["recovery_capability"] = json!(capability);
+    Ok(Json(response))
 }
 
 #[derive(Deserialize)]

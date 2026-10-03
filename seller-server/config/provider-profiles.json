@@ -3,24 +3,28 @@
     "id": "fixture-echo",
     "name": "Canonical object echo",
     "provider_type": "LOCAL_FIXTURE",
-    "privacy_support": true
+    "privacy_support": true,
+    "recovery_capability": "DURABLE_RESULT_REPLAY_ONLY"
   },
   {
     "id": "fixture-lead",
     "name": "Deterministic lead records",
     "provider_type": "LOCAL_FIXTURE",
-    "privacy_support": true
+    "privacy_support": true,
+    "recovery_capability": "DURABLE_RESULT_REPLAY_ONLY"
   },
   {
     "id": "fixture-source",
     "name": "Independent source fixture",
     "provider_type": "LOCAL_FIXTURE",
-    "privacy_support": true
+    "privacy_support": true,
+    "recovery_capability": "DURABLE_RESULT_REPLAY_ONLY"
   },
   {
     "id": "fixture-code",
     "name": "Pure JavaScript module fixture",
     "provider_type": "LOCAL_FIXTURE",
-    "privacy_support": true
+    "privacy_support": true,
+    "recovery_capability": "DURABLE_RESULT_REPLAY_ONLY"
   }
 ]

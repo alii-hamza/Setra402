@@ -27,6 +27,7 @@ const profilesSchema = z.array(
       name: z.string(),
       provider_type: z.literal("LOCAL_FIXTURE"),
       privacy_support: z.boolean(),
+      recovery_capability: z.literal("DURABLE_RESULT_REPLAY_ONLY"),
     })
     .strict()
 );

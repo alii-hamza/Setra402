@@ -14,6 +14,14 @@ struct StoredResult {
     checksum: String,
     result: TaskResult,
 }
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionIntent {
+    pub version: u8,
+    pub input_hash: String,
+    pub service_id: String,
+    pub state: String,
+}
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -54,6 +62,29 @@ pub fn claim(path: &Path, input_hash: &str, service: &str) -> io::Result<()> {
     file.write_all(json!({"version":1,"input_hash":input_hash,"service_id":service,"state":"UNKNOWN_EXTERNAL_EFFECT"}).to_string().as_bytes())?;
     file.sync_all()?;
     sync_directory(parent)
+}
+/// Read-only Phase 4A.3 evidence. Absence of an intent is not proof that a
+/// provider effect did not occur (the store may have been moved or restored).
+pub fn load_intent(path: &Path) -> io::Result<Option<ExecutionIntent>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let intent: ExecutionIntent =
+        serde_json::from_slice(&bytes).map_err(|_| invalid("malformed execution intent"))?;
+    if intent.version != 1
+        || intent.state != "UNKNOWN_EXTERNAL_EFFECT"
+        || intent.service_id.is_empty()
+        || intent.input_hash.len() != 64
+        || !intent
+            .input_hash
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(invalid("invalid execution intent"));
+    }
+    Ok(Some(intent))
 }
 pub fn load(path: &Path) -> io::Result<Option<TaskResult>> {
     let bytes = match fs::read(path) {
