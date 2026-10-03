@@ -7,6 +7,7 @@
 
 use crate::config::{AppState, PaymentQuote, TaskRequest, TaskResult, PROTOCOL_FEE_BPS};
 use crate::execute::hash_canonical;
+use crate::mint_store::{self, IssuanceIntent, IssuanceReceipt};
 use crate::pda::{task_state_pda, vault_pda};
 use crate::registry::{load_services, policy_hash, profile_recovery_capability, ServiceDefinition};
 use crate::task_state::{try_from_account_data, TaskStatus};
@@ -475,6 +476,58 @@ pub struct BlindSignResponse {
     pub mint_pubkey: String,     // 32-byte hex-encoded point K
 }
 
+fn mint_paths(
+    state: &AppState,
+    task_pda: &Pubkey,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), ApiError> {
+    let execution = state
+        .execution_store
+        .as_ref()
+        .ok_or_else(|| internal_error("Durable mint issuance store unavailable"))?;
+    let state_root = execution
+        .parent()
+        .ok_or_else(|| internal_error("Invalid issuance state root"))?;
+    Ok(mint_store::paths(state_root, &task_pda.to_string()))
+}
+
+pub async fn get_mint_issuance(
+    State(state): State<AppState>,
+    Path(task_id): Path<u64>,
+    Query(query): Query<ResultQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let buyer = Pubkey::from_str(query.buyer.as_deref().unwrap_or(""))
+        .map_err(|_| bad_request("Valid buyer pubkey required"))?;
+    let (pda, _) = task_state_pda(&state.program_id, &buyer, task_id);
+    let (intent_path, receipt_path) = mint_paths(&state, &pda)?;
+    let (intent, receipt) = mint_store::load(&intent_path, &receipt_path).map_err(|_| {
+        (
+            StatusCode::CONFLICT,
+            Json(json!({"error":"Corrupt or conflicting issuance evidence"})),
+        )
+    })?;
+    if intent
+        .as_ref()
+        .is_some_and(|i| i.buyer != buyer.to_string() || i.task_id != task_id)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error":"Issuance task binding conflict"})),
+        ));
+    }
+    let current_key = hex::encode(state.mint_public_key.compress().to_bytes());
+    Ok(Json(json!({
+        "version":"1",
+        "buyer":buyer.to_string(),
+        "task_id":task_id.to_string(),
+        "task_state_pda":pda.to_string(),
+        "state":if receipt.is_some() {"RESPONSE_PERSISTED"} else if intent.is_some() {"INTENT_ONLY"} else {"NO_LOCAL_EVIDENCE"},
+        "blinded_point":intent.as_ref().map(|i| i.blinded_point.as_str()),
+        "mint_pubkey":intent.as_ref().map(|i| i.mint_pubkey.as_str()),
+        "blind_signature":receipt.as_ref().map(|r| r.blind_signature.as_str()),
+        "current_mint_matches_receipt":intent.as_ref().map(|i| i.mint_pubkey == current_key),
+    })))
+}
+
 pub async fn handle_blind_sign(
     State(state): State<AppState>,
     Json(req): Json<BlindSignRequest>,
@@ -491,6 +544,40 @@ pub async fn handle_blind_sign(
         .ok_or_else(|| bad_request("Curve point decompression failed: not on Ristretto255"))?;
 
     let (task_state_addr, _bump) = task_state_pda(&state.program_id, &buyer, req.task_id);
+
+    let (intent_path, receipt_path) = mint_paths(&state, &task_state_addr)?;
+    let (intent, receipt) = mint_store::load(&intent_path, &receipt_path).map_err(|_| {
+        (
+            StatusCode::CONFLICT,
+            Json(json!({"error":"Corrupt or conflicting issuance evidence"})),
+        )
+    })?;
+    let current_key = hex::encode(state.mint_public_key.compress().to_bytes());
+    let requested_point = hex::encode(b_point.compress().to_bytes());
+    if let Some(intent) = intent {
+        if intent.buyer != buyer.to_string()
+            || intent.task_id != req.task_id
+            || intent.blinded_point != requested_point
+            || intent.mint_pubkey != current_key
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({"error":"Existing issuance binding or mint identity differs"})),
+            ));
+        }
+        return match receipt {
+            Some(saved) => Ok(Json(BlindSignResponse {
+                blind_signature: saved.blind_signature,
+                mint_pubkey: saved.mint_pubkey,
+            })),
+            None => Err((
+                StatusCode::CONFLICT,
+                Json(
+                    json!({"error":"Issuance intent unresolved; read-only reconciliation required"}),
+                ),
+            )),
+        };
+    }
 
     // Verify on-chain escrow state
     let account_data = state
@@ -523,12 +610,42 @@ pub async fn handle_blind_sign(
         ));
     }
 
-    // Compute blind signature: C = k * B
+    // Claim the exact buyer/task/request/key before any signing. A crash after
+    // this point without a receipt remains unknown and cannot be reissued.
+    let intent = IssuanceIntent {
+        version: 1,
+        buyer: buyer.to_string(),
+        task_id: req.task_id,
+        blinded_point: requested_point.clone(),
+        mint_pubkey: current_key.clone(),
+    };
+    match mint_store::claim(&intent_path, &intent) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({"error":"Issuance already claimed; query evidence"})),
+            ))
+        }
+        Err(_) => return Err(internal_error("Could not persist issuance intent")),
+    }
     let c_point: RistrettoPoint = state.mint_secret_key * b_point;
-
+    let signature = hex::encode(c_point.compress().to_bytes());
+    let receipt = IssuanceReceipt {
+        version: 1,
+        buyer: buyer.to_string(),
+        task_id: req.task_id,
+        blinded_point: requested_point,
+        mint_pubkey: current_key.clone(),
+        blind_signature: signature.clone(),
+    };
+    match mint_store::complete(&receipt_path, &receipt) {
+        Ok(true) => {}
+        _ => return Err(internal_error("Issuance receipt not durably published")),
+    }
     Ok(Json(BlindSignResponse {
-        blind_signature: hex::encode(c_point.compress().to_bytes()),
-        mint_pubkey: hex::encode(state.mint_public_key.compress().to_bytes()),
+        blind_signature: signature,
+        mint_pubkey: current_key,
     }))
 }
 

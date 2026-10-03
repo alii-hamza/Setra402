@@ -2,6 +2,7 @@ pub mod config;
 pub mod execute;
 pub mod execution_store;
 pub mod handlers;
+pub mod mint_store;
 pub mod pda;
 pub mod registry;
 pub mod rpc;
@@ -29,6 +30,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/fixtures/company", get(handlers::fixture_source))
         // Phase 3 Cryptographic Endpoints
         .route("/mint/blind-sign", post(handlers::handle_blind_sign))
+        .route("/mint/issuance/:task_id", get(handlers::get_mint_issuance))
         .route("/verifier/nullify", post(handlers::handle_nullify))
         .with_state(state)
 }

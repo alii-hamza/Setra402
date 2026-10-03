@@ -97,7 +97,8 @@ type Family =
   | "vouchers"
   | "challenges"
   | "sandbox-leases"
-  | "seller-executions";
+  | "seller-executions"
+  | "mint-issuance";
 const buyerFamilies: Family[] = [
   "tasks",
   "manifests",
@@ -323,6 +324,7 @@ function readReport(path: string): VerificationReport {
 export interface RecoveryInventoryOptions {
   stateDirectory: string;
   sellerExecutionDirectory?: string;
+  sellerMintDirectory?: string;
   sellerUrl?: string;
   configuredBuyer?: string;
 }
@@ -344,7 +346,10 @@ export function scanRecoveryInventory(
     return recoveryInventoryV1Schema.parse({
       version: "1",
       families: Object.fromEntries(
-        [...buyerFamilies, "seller-executions"].map((name) => [name, "MISSING"])
+        [...buyerFamilies, "seller-executions", "mint-issuance"].map((name) => [
+          name,
+          "MISSING",
+        ])
       ),
       authoritativeExternalEvidence: "NOT_QUERIED",
       recommendedAction: "OPERATOR_REVIEW_REQUIRED",
@@ -356,6 +361,11 @@ export function scanRecoveryInventory(
   const familyPath = (family: Family) =>
     family === "seller-executions"
       ? resolve(options.sellerExecutionDirectory!)
+      : family === "mint-issuance"
+      ? resolve(
+          options.sellerMintDirectory ??
+            join(dirname(options.sellerExecutionDirectory!), "mint-issuance")
+        )
       : join(root, family);
   const listing = new Map<Family, string[]>();
   for (const family of buyerFamilies) {
@@ -398,6 +408,26 @@ export function scanRecoveryInventory(
       listing.set("seller-executions", []);
     }
   } else families["seller-executions"] = "NOT_CONFIGURED";
+  if (options.sellerMintDirectory || options.sellerExecutionDirectory) {
+    const directory = familyPath("mint-issuance");
+    families["mint-issuance"] = existsSync(directory) ? "PRESENT" : "MISSING";
+    try {
+      listing.set(
+        "mint-issuance",
+        files(directory).filter((name) => {
+          if (!name.endsWith(".tmp")) return true;
+          staleTemporaryFiles.push(join(directory, name));
+          return false;
+        })
+      );
+    } catch {
+      families["mint-issuance"] = "UNREADABLE";
+      conflicts.push(
+        "mint-issuance: unreadable or unexpected directory contents"
+      );
+      listing.set("mint-issuance", []);
+    }
+  } else families["mint-issuance"] = "NOT_CONFIGURED";
 
   const byPda = new Map<string, Task>();
   const byController = new Map<string, Task>();
@@ -1003,6 +1033,88 @@ export function scanRecoveryInventory(
     }
   }
 
+  const issuance = new Map<string, Record<string, unknown>>();
+  for (const name of listing.get("mint-issuance") ?? []) {
+    const match = /^([1-9A-HJ-NP-Za-km-z]{32,44})\.(intent|receipt)$/.exec(
+      name
+    );
+    if (!match) {
+      conflicts.push(`mint-issuance: unexpected record ${name}`);
+      continue;
+    }
+    const pda = match[1]!,
+      role = match[2]!;
+    const parsed = inspect(
+      familyPath("mint-issuance"),
+      name,
+      "voucherIssuance",
+      `seller-${role}`,
+      "seller_local",
+      (path) => {
+        const envelope = object(JSON.parse(readFileSync(path, "utf8")));
+        strictKeys(envelope, ["version", "checksum", "value"]);
+        if (
+          envelope.version !== 1 ||
+          envelope.checksum !== hashCanonical(envelope.value)
+        )
+          throw new Error("invalid issuance envelope");
+        const value = object(envelope.value);
+        strictKeys(
+          value,
+          role === "intent"
+            ? ["version", "buyer", "task_id", "blinded_point", "mint_pubkey"]
+            : [
+                "version",
+                "buyer",
+                "task_id",
+                "blinded_point",
+                "mint_pubkey",
+                "blind_signature",
+              ]
+        );
+        if (
+          value.version !== 1 ||
+          !pubkey.safeParse(value.buyer).success ||
+          typeof value.task_id !== "number" ||
+          !Number.isSafeInteger(value.task_id) ||
+          value.task_id < 0 ||
+          !hash.safeParse(value.blinded_point).success ||
+          !hash.safeParse(value.mint_pubkey).success ||
+          (role === "receipt" && !hash.safeParse(value.blind_signature).success)
+        )
+          throw new Error("invalid issuance payload");
+        return value;
+      }
+    );
+    const task = byPda.get(pda);
+    if (!task) {
+      unattached.push(parsed.record);
+      conflicts.push(`orphan mint issuance ${name}`);
+      continue;
+    }
+    add(task, parsed.record);
+    if (!parsed.value) continue;
+    const value = parsed.value as Record<string, unknown>;
+    if (
+      value.buyer !== task.taskIdentity?.buyer ||
+      String(value.task_id) !== task.taskIdentity?.taskId
+    )
+      conflict(task, "mint issuance task binding conflicts");
+    if (!task.taskIdentity?.privacy)
+      conflict(task, "mint issuance attached to public task");
+    if (role === "intent") issuance.set(pda, value);
+    else {
+      const intent = issuance.get(pda);
+      if (
+        !intent ||
+        ["buyer", "task_id", "blinded_point", "mint_pubkey"].some(
+          (field) => intent[field] !== value[field]
+        )
+      )
+        conflict(task, "orphan or conflicting mint issuance receipt");
+    }
+  }
+
   for (const name of listing.get("vouchers") ?? []) {
     const match = voucherName.exec(name);
     if (!match) {
@@ -1164,7 +1276,13 @@ export function scanRecoveryInventory(
       (task.evidence.tasks?.some((r) => r.role === "run.intent") &&
         !task.evidence.result?.some((r) => r.status === "VALID")) ||
       (task.evidence.voucherIssuance?.some((r) => r.role === "intent") &&
-        !task.evidence.voucherIssuance?.some((r) => r.role === "voucher.json"));
+        !task.evidence.voucherIssuance?.some(
+          (r) => r.role === "voucher.json"
+        )) ||
+      (task.evidence.voucherIssuance?.some((r) => r.role === "seller-intent") &&
+        !task.evidence.voucherIssuance?.some(
+          (r) => r.role === "seller-receipt"
+        ));
     task.classifications = [
       ...(financial ? ["UNKNOWN_FINANCIAL_OUTCOME" as const] : []),
       ...(executionUnknown ? ["UNKNOWN_EXTERNAL_EFFECT" as const] : []),

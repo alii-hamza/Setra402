@@ -142,8 +142,43 @@ impl AppState {
         let redis_client = RedisClient::open(redis_url.as_str())
             .map_err(|e| ConfigError::Invalid("REDIS_URL", e.to_string()))?;
 
-        // Phase 3: Generate mint keypair
-        let mint_secret_key = Scalar::random(&mut OsRng);
+        // A deployment that needs cross-restart mint identity pins this secret
+        // server-side. The legacy ephemeral fallback remains explicit: an
+        // issuance under that key cannot be assumed current after restart.
+        let mint_secret_key = match std::env::var("SETRA_MINT_SECRET_HEX") {
+            Ok(raw) => {
+                let bytes = hex::decode(&raw).map_err(|_| {
+                    ConfigError::Invalid(
+                        "SETRA_MINT_SECRET_HEX",
+                        "expected canonical 32-byte hex scalar".into(),
+                    )
+                })?;
+                let array: [u8; 32] = bytes.try_into().map_err(|_| {
+                    ConfigError::Invalid(
+                        "SETRA_MINT_SECRET_HEX",
+                        "expected canonical 32-byte hex scalar".into(),
+                    )
+                })?;
+                let scalar: Option<Scalar> = Scalar::from_canonical_bytes(array).into();
+                let scalar = scalar.ok_or_else(|| {
+                    ConfigError::Invalid("SETRA_MINT_SECRET_HEX", "non-canonical scalar".into())
+                })?;
+                if scalar == Scalar::ZERO {
+                    return Err(ConfigError::Invalid(
+                        "SETRA_MINT_SECRET_HEX",
+                        "zero scalar".into(),
+                    ));
+                }
+                scalar
+            }
+            Err(std::env::VarError::NotPresent) => Scalar::random(&mut OsRng),
+            Err(_) => {
+                return Err(ConfigError::Invalid(
+                    "SETRA_MINT_SECRET_HEX",
+                    "invalid unicode".into(),
+                ))
+            }
+        };
         let mint_public_key = mint_secret_key * RISTRETTO_BASEPOINT_POINT;
 
         Ok(AppState {

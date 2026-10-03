@@ -801,6 +801,11 @@ async fn blind_sign_rejects_non_private_tasks() {
 
     let mut state = state_with_fake_chain(json!({"data": [encoded, "base64"]})).await;
     state.mint = mint;
+    state.execution_store = Some(
+        std::env::temp_dir()
+            .join(format!("setra-mint-reject-{buyer}"))
+            .join("executions"),
+    );
     let router = seller_server::build_router(state);
 
     // Generate a valid blinded point
@@ -901,6 +906,11 @@ async fn blind_sign_returns_k_b_and_survives_the_blind_unblind_cycle() {
 
     let mut state = state_with_fake_chain(json!({"data": [encoded, "base64"]})).await;
     state.mint = mint;
+    state.execution_store = Some(
+        std::env::temp_dir()
+            .join(format!("setra-mint-happy-{buyer}"))
+            .join("executions"),
+    );
 
     // Snapshot the mint keys before the state moves into the router, so the
     // expected values are recomputed independently of the handler.
@@ -973,6 +983,94 @@ async fn blind_sign_returns_k_b_and_survives_the_blind_unblind_cycle() {
     assert_eq!(repeat.status(), StatusCode::OK);
     let repeat_body = body_json(repeat).await;
     assert_eq!(repeat_body["blind_signature"].as_str().unwrap(), signature);
+}
+
+#[tokio::test]
+async fn mint_issuance_status_replays_only_exact_durable_receipt_after_restart() {
+    let buyer = Pubkey::new_unique();
+    let mint = Pubkey::new_unique();
+    let data = encode_task_state(&buyer, &mint, PRICE, 0, 9_999_999_999, true);
+    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
+    let mut state = state_with_fake_chain(json!({"data":[encoded,"base64"]})).await;
+    state.mint = mint;
+    state.execution_store = Some(
+        std::env::temp_dir()
+            .join(format!("setra-mint-restart-{buyer}"))
+            .join("executions"),
+    );
+    let point = hex::encode(
+        (Scalar::from(17u64) * RISTRETTO_BASEPOINT_POINT)
+            .compress()
+            .to_bytes(),
+    );
+    let post = |blinded: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/mint/blind-sign")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"buyer":buyer.to_string(),"task_id":TASK_ID,"blinded_point":blinded})
+                    .to_string(),
+            ))
+            .unwrap()
+    };
+    let get = || {
+        Request::builder()
+            .uri(format!("/mint/issuance/{TASK_ID}?buyer={buyer}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let first = seller_server::build_router(state.clone())
+        .oneshot(post(&point))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = body_json(first).await;
+    let recovered = seller_server::build_router(state.clone())
+        .oneshot(get())
+        .await
+        .unwrap();
+    assert_eq!(recovered.status(), StatusCode::OK);
+    let evidence = body_json(recovered).await;
+    assert_eq!(evidence["state"], "RESPONSE_PERSISTED");
+    assert_eq!(evidence["blind_signature"], first_body["blind_signature"]);
+    assert_eq!(evidence["current_mint_matches_receipt"], true);
+    let replay = seller_server::build_router(state.clone())
+        .oneshot(post(&point))
+        .await
+        .unwrap();
+    assert_eq!(body_json(replay).await, first_body);
+    let changed = hex::encode(
+        (Scalar::from(19u64) * RISTRETTO_BASEPOINT_POINT)
+            .compress()
+            .to_bytes(),
+    );
+    assert_eq!(
+        seller_server::build_router(state.clone())
+            .oneshot(post(&changed))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    state.mint_secret_key = Scalar::from(23u64);
+    state.mint_public_key = state.mint_secret_key * RISTRETTO_BASEPOINT_POINT;
+    let rotated = seller_server::build_router(state.clone())
+        .oneshot(get())
+        .await
+        .unwrap();
+    assert_eq!(
+        body_json(rotated).await["current_mint_matches_receipt"],
+        false
+    );
+    assert_eq!(
+        seller_server::build_router(state)
+            .oneshot(post(&point))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
 }
 
 // Phase 3: Test nullifier endpoint

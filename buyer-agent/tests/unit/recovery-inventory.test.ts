@@ -334,6 +334,42 @@ describe("Phase 4A.1 recovery inventory (local evidence only)", () => {
     expect(task.classifications).toContain("UNKNOWN_EXTERNAL_EFFECT");
     expect(task.classifications).not.toContain("UNKNOWN_FINANCIAL_OUTCOME");
   });
+  it("inventories seller mint intent and exact receipt without inventing issuance after an orphan", () => {
+    const f = fixture(true);
+    const directory = join(f.root, "mint-issuance");
+    mkdirSync(directory, { recursive: true });
+    const intent = {
+      version: 1,
+      buyer: f.buyer,
+      task_id: Number(f.taskId),
+      blinded_point: "a".repeat(64),
+      mint_pubkey: "b".repeat(64),
+    };
+    const receipt = { ...intent, blind_signature: "c".repeat(64) };
+    const write = (role: string, value: unknown) =>
+      writeFileSync(
+        join(directory, `${f.taskState}.${role}`),
+        JSON.stringify({ version: 1, checksum: hashCanonical(value), value })
+      );
+    write("intent", intent);
+    expect(f.inventory().tasks[0]?.classifications).toContain(
+      "UNKNOWN_EXTERNAL_EFFECT"
+    );
+    write("receipt", receipt);
+    expect(
+      f.inventory().tasks[0]?.evidence.voucherIssuance?.map((r) => r.role)
+    ).toEqual(["seller-intent", "seller-receipt"]);
+    expect(f.inventory().tasks[0]?.conflicts).toEqual([]);
+    const changed = { ...receipt, blinded_point: "d".repeat(64) };
+    write("receipt", changed);
+    expect(f.inventory().tasks[0]?.classifications).toContain(
+      "RECONCILIATION_REQUIRED"
+    );
+    rmSync(join(directory, `${f.taskState}.intent`));
+    expect(f.inventory().tasks[0]?.conflicts).toContain(
+      "orphan or conflicting mint issuance receipt"
+    );
+  });
   it.each(["truncated", "checksum", "future-version", "wrong-key"])(
     "fails closed on %s journal",
     (damage) => {
