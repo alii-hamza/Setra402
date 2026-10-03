@@ -4,6 +4,7 @@ import { mkdtemp, writeFile, chmod, unlink, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunnerProfile } from "./runner-registry.js";
+import { SandboxLeases } from "./sandbox-leases.js";
 
 export interface SandboxResult {
   exitCode: number;
@@ -28,7 +29,8 @@ export class DockerSandbox implements Sandbox {
   readonly containerPrefix = `setra402-verify-${randomUUID()}`;
   constructor(
     private readonly cli: DockerCommand = { executable: "docker" },
-    private readonly maxOutputBytes = 65_536
+    private readonly maxOutputBytes = 65_536,
+    private readonly leases = new SandboxLeases()
   ) {
     if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1)
       throw new Error("invalid sandbox output limit");
@@ -102,6 +104,16 @@ export class DockerSandbox implements Sandbox {
       timeoutSeconds > 300
     )
       throw new Error("invalid sandbox timeout");
+    await this.leases.recover(async (name) => {
+      const result = await this.run(
+        ["rm", "--force", "--volumes", name],
+        10_000
+      );
+      if (result.code !== 0 && !/No such container/i.test(result.output))
+        throw new Error(
+          "orphan sandbox cleanup unavailable; reconciliation required"
+        );
+    });
     const started = Date.now();
     const name = `${this.containerPrefix}-${randomUUID()}`;
     const directory = await mkdtemp(
@@ -109,6 +121,7 @@ export class DockerSandbox implements Sandbox {
     );
     const artifactPath = join(directory, "artifact.mjs");
     const bundlePath = join(directory, "tests.mjs");
+    const lease = this.leases.claim(name, directory);
     let created = false;
     try {
       await chmod(directory, 0o755);
@@ -163,14 +176,19 @@ export class DockerSandbox implements Sandbox {
           "--mount",
           `type=bind,src=${inputPath},dst=/tmp,readonly`,
           "--entrypoint",
-          profile.command[0]!,
+          "/usr/bin/timeout",
           profile.image,
-          ...profile.command.slice(1),
+          "-s",
+          "KILL",
+          `${timeoutSeconds}`,
+          ...profile.command,
         ],
         10_000
       );
       if (create.code !== 0)
-        throw new Error("safe sandbox unavailable: container creation failed");
+        throw new Error("safe sandbox unavailable: container creation failed", {
+          cause: new Error(create.output),
+        });
       created = true;
       const run = await this.run(
         ["start", "--attach", name],
@@ -191,6 +209,8 @@ export class DockerSandbox implements Sandbox {
         );
         if (created && cleanup.code !== 0)
           throw new Error("sandbox cleanup failed");
+        if (cleanup.code === 0 || /No such container/i.test(cleanup.output))
+          this.leases.complete(lease);
       } finally {
         // Fixed files in our exclusive directory; no recursive removal and no
         // seller-derived filesystem target. Container mount is read-only.

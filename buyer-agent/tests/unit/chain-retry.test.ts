@@ -39,6 +39,16 @@ describe("Solana transaction retry safety", () => {
       async getSignatureStatus() {
         return { context: { slot: 1 }, value: null };
       },
+      async getBlockHeight(commitment: string) {
+        expect(commitment).toBe("finalized");
+        return 200; // Authoritative expiry evidence, beyond lastValidBlockHeight.
+      },
+      async getSlot() {
+        return 1;
+      },
+      async getParsedBlock() {
+        return { blockHeight: 200 };
+      },
     } as unknown as Connection;
 
     await sendRebuiltTransaction({
@@ -46,6 +56,9 @@ describe("Solana transaction retry safety", () => {
       payer,
       signers: [payer],
       maxAttempts: 2,
+      async canRebuild() {
+        return true;
+      }, // SIMULATED account remains eligible.
       onSigned(signature) {
         signed.push(signature);
       },

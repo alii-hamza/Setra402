@@ -31,6 +31,7 @@ function setup() {
     normalizeQuote() {
       return h.quote;
     },
+    async validateFundingReceipt() {}, // SIMULATED confirmed receipt.
     async fund() {
       counts.fund++;
       chainState = { status: "pending", deadlineUnix: 100 };

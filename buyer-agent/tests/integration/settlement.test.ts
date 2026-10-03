@@ -112,6 +112,9 @@ function fakeChain(state = pending()) {
   const calls: string[] = [];
   let current = state;
   const chain: SettlementChain = {
+    async confirmSignature() {
+      return true;
+    },
     buyer,
     verifier,
     async getChainUnixTime() {

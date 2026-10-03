@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use solana_pubkey::Pubkey;
 use std::str::FromStr;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 // Phase 3 Cryptographic imports
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
@@ -178,10 +177,11 @@ pub async fn handle_task(
     // when clock.unix_timestamp >= deadline_unix): a Pending-but-expired task
     // must not be executed, or the buyer could walk away with both the
     // output and a full refund of the escrowed amount.
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before 1970")
-        .as_secs() as i64;
+    let now = state
+        .rpc
+        .get_chain_unix_time()
+        .await
+        .map_err(|e| internal_error(&format!("chain clock unavailable: {e}")))?;
     if now >= task_state.deadline_unix {
         return Err((
             StatusCode::GONE,
@@ -207,18 +207,23 @@ pub async fn handle_task(
         .as_ref()
         .map(|dir| dir.join(format!("{key}.json")));
     if let Some(path) = &saved_path {
-        match std::fs::read(path) {
-            Ok(bytes) => {
-                let saved: TaskResult = serde_json::from_slice(&bytes)
-                    .map_err(|_| internal_error("malformed persisted result"))?;
+        match crate::execution_store::load(path) {
+            Ok(Some(saved)) => {
                 results.insert(key.clone(), saved);
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(internal_error("cannot read persisted result")),
+            Ok(None) => {}
+            Err(_) => {
+                return Err(internal_error(
+                    "corrupt result journal; reconciliation required",
+                ))
+            }
         }
     }
     if let Some(saved) = results.get(&key) {
-        if saved.output_hash != output_hash || saved.service_id != service.id {
+        if saved.output_hash != output_hash
+            || saved.service_id != service.id
+            || saved.task_id != task_id.to_string()
+        {
             return Err((
                 StatusCode::CONFLICT,
                 Json(json!({"error":"task identity reused with different input or service"})),
@@ -228,8 +233,8 @@ pub async fn handle_task(
     }
     if let Some(dir) = &state.execution_store {
         std::fs::create_dir_all(dir).map_err(|_| internal_error("execution store unavailable"))?;
-        std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join(format!("{key}.intent")))
-            .map_err(|_| (StatusCode::CONFLICT, Json(json!({"error":"execution already claimed; unresolved outcome requires reconciliation"}))))?;
+        crate::execution_store::claim(&dir.join(format!("{key}.intent")), &output_hash, &service.id)
+            .map_err(|_| (StatusCode::CONFLICT, Json(json!({"error":"execution already claimed or persistence failed; unresolved outcome requires reconciliation", "classification":"UNKNOWN_EXTERNAL_EFFECT", "reconciliationRequired":true}))))?;
     }
     let completed_at_unix = now;
     let mut evidence = Vec::new();
@@ -278,11 +283,9 @@ pub async fn handle_task(
         completed_at_unix,
     };
     if let Some(path) = saved_path {
-        let temporary = path.with_extension("tmp");
-        let bytes =
-            serde_json::to_vec(&result).map_err(|_| internal_error("cannot encode result"))?;
-        std::fs::write(&temporary, bytes).map_err(|_| internal_error("cannot persist result"))?;
-        std::fs::rename(temporary, path).map_err(|_| internal_error("cannot commit result"))?;
+        crate::execution_store::save(&path, &result).map_err(|_| {
+            internal_error("cannot persist completed execution; reconciliation required")
+        })?;
     }
     results.insert(key, result.clone());
 
@@ -319,9 +322,8 @@ pub async fn get_artifact(
         .cloned();
     if result.is_none() {
         if let Some(dir) = &state.execution_store {
-            if let Ok(bytes) = std::fs::read(dir.join(format!("{key}.json"))) {
-                result = serde_json::from_slice(&bytes).ok();
-            }
+            result = crate::execution_store::load(&dir.join(format!("{key}.json")))
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         }
     }
     let result = result.ok_or(StatusCode::NOT_FOUND)?;
@@ -340,7 +342,30 @@ pub async fn fixture_source() -> Json<Value> {
 pub async fn get_result(
     State(state): State<AppState>,
     Path(task_id): Path<u64>,
+    Query(query): Query<ResultQuery>,
 ) -> Result<Json<TaskResult>, StatusCode> {
+    if let Some(buyer) = query.buyer {
+        let buyer = Pubkey::from_str(&buyer).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let (pda, _) = task_state_pda(&state.program_id, &buyer, task_id);
+        let key = pda.to_string();
+        let mut result = state
+            .results
+            .lock()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .get(&key)
+            .cloned();
+        if result.is_none() {
+            if let Some(dir) = &state.execution_store {
+                result = crate::execution_store::load(&dir.join(format!("{key}.json")))
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            }
+        }
+        let result = result.ok_or(StatusCode::NOT_FOUND)?;
+        if result.task_id != task_id.to_string() {
+            return Err(StatusCode::CONFLICT);
+        }
+        return Ok(Json(result));
+    }
     let results = state
         .results
         .lock()
@@ -353,6 +378,12 @@ pub async fn get_result(
         return Err(StatusCode::CONFLICT);
     }
     Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResultQuery {
+    pub buyer: Option<String>,
 }
 
 // Phase 3: Blind signature endpoint

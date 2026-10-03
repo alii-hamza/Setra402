@@ -25,6 +25,7 @@ export interface SettlementChain {
   verifier: PublicKey;
   fetchTaskState(address: PublicKey): Promise<TaskStateView | null>;
   getChainUnixTime(): Promise<number>;
+  confirmSignature?(signature: string): Promise<boolean>;
   verifyManifestMemo(signature: string, expectedHash: string): Promise<void>;
   settlePublic(
     taskState: PublicKey,
@@ -138,6 +139,8 @@ export class SettlementCoordinator {
         recoveredState = await this.chain.fetchTaskState(taskStateAddress);
         if (recoveredState?.status !== "settled") throw error;
         if (!(await this.chain.fetchNullifierRecord(nullifier))) throw error;
+        if (!(await this.chain.confirmSignature?.(error.signature)))
+          throw error;
         signature = error.signature;
       }
       if (this.mirrorNullifier) {
@@ -158,6 +161,8 @@ export class SettlementCoordinator {
         if (!(error instanceof TransactionSubmissionError)) throw error;
         recoveredState = await this.chain.fetchTaskState(taskStateAddress);
         if (recoveredState?.status !== "settled") throw error;
+        if (!(await this.chain.confirmSignature?.(error.signature)))
+          throw error;
         signature = error.signature;
       }
     }
@@ -240,6 +245,7 @@ export class SettlementCoordinator {
       if (!(error instanceof TransactionSubmissionError)) throw error;
       refunded = await this.chain.fetchTaskState(taskState);
       if (refunded?.status !== "refunded") throw error;
+      if (!(await this.chain.confirmSignature?.(error.signature))) throw error;
       signature = error.signature;
     }
     refunded ??= await this.chain.fetchTaskState(taskState);
@@ -248,12 +254,10 @@ export class SettlementCoordinator {
     return signature;
   }
 
-  async cancelVoluntarily(
-    quote: TaskQuote,
-    nowUnix = Math.floor(Date.now() / 1000)
-  ): Promise<string> {
+  async cancelVoluntarily(quote: TaskQuote, nowUnix?: number): Promise<string> {
     const taskState = new PublicKey(quote.taskStatePda);
     const state = await this.requirePending(taskState);
+    nowUnix ??= await this.chain.getChainUnixTime();
     if (nowUnix >= state.deadlineUnix)
       throw new TaskConflict(
         "task is expired; use timeout refund instead of cancellation"
@@ -273,6 +277,7 @@ export class SettlementCoordinator {
       if (!(error instanceof TransactionSubmissionError)) throw error;
       cancelled = await this.chain.fetchTaskState(taskState);
       if (cancelled?.status !== "refunded") throw error;
+      if (!(await this.chain.confirmSignature?.(error.signature))) throw error;
       signature = error.signature;
     }
     cancelled ??= await this.chain.fetchTaskState(taskState);

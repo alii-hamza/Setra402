@@ -9,6 +9,7 @@ import {
 } from "@solana/spl-token";
 import { PublicKey, Keypair, SystemProgram } from "@solana/web3.js";
 import { expect } from "chai";
+import { randomBytes } from "node:crypto";
 
 describe("setra402-escrow", () => {
   const provider = anchor.AnchorProvider.env();
@@ -178,7 +179,7 @@ describe("setra402-escrow", () => {
     const taskId = new anchor.BN(3);
     const [taskState] = getTaskPda(buyer.publicKey, taskId);
     const [vault] = getVaultPda(taskState);
-    const nullifier = Buffer.alloc(32, 42);
+    const nullifier = randomBytes(32);
     const [nullifierRecord] = getNullifierPda(nullifier);
 
     await program.methods
@@ -259,7 +260,7 @@ describe("setra402-escrow", () => {
   it("Scenario 5: Double-Spend Rejection (Same Nullifier Cannot Settle Twice)", async () => {
     const taskId5A = new anchor.BN(5);
     const taskId5B = new anchor.BN(6);
-    const sharedNullifier = Buffer.alloc(32, 99); // Shared secret
+    const sharedNullifier = randomBytes(32); // Reused across both tasks to test rejection
     const [nullifierRecord] = getNullifierPda(sharedNullifier);
 
     // Initialize Task 5A

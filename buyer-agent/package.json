@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test:recovery": "npm run build:runtime && vitest run phase35 --no-file-parallelism",
     "build": "tsc -p tsconfig.json",
     "build:runtime": "tsc -p tsconfig.runtime.json",
     "mcp:server": "npm run build:runtime && node dist/mcp/server.js",
@@ -15,12 +16,12 @@
     "test": "vitest run tests/unit tests/integration",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
-    "test:e2e": "npm run build:runtime && vitest run tests/e2e",
+    "test:e2e": "npm run build:runtime && vitest run tests/e2e --no-file-parallelism",
     "test:rest": "vitest run tests/integration/rest-x402.test.ts tests/e2e/rest-flow.test.ts",
     "test:l1": "vitest run tests/unit/verification-level1.test.ts tests/unit/verification-engine.test.ts tests/unit/canonical-vectors.test.ts tests/unit/artifact-loader.test.ts tests/integration/verification-settlement.test.ts",
     "test:l2": "vitest run tests/unit/source-sampling.test.ts tests/unit/test-suite.test.ts tests/integration/source-verification.test.ts tests/integration/level2-settlement.test.ts tests/sandbox",
     "test:privacy": "vitest run tests/e2e/rest-flow.test.ts -t \"preserves private settlement\"",
-    "test:sandbox": "vitest run tests/sandbox",
+    "test:sandbox": "vitest run tests/sandbox --no-file-parallelism",
     "format:check": "prettier --check src tests config scripts package.json tsconfig.json tsconfig.runtime.json docs/PHASE3*.md ../frontend ../seller-server/config/provider-profiles.json",
     "test:all": "node scripts/test-all.mjs"
   },

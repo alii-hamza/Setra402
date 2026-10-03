@@ -14,6 +14,11 @@ import { z } from "zod";
 import { parseVerificationPolicy } from "../verification/policy.js";
 import { hashCanonical } from "../manifest/hash.js";
 import { defaultRunners } from "../verification/level2/default-runners.js";
+import {
+  ensureDurableDirectory,
+  syncDirectory,
+  type JournalFault,
+} from "../core/journal.js";
 
 const profilesSchema = z.array(
   z
@@ -111,8 +116,12 @@ export class ServiceRegistry {
   constructor(
     private readonly baseline: string | URL,
     readonly overlay: string,
-    readonly writeEnabled = false
-  ) {}
+    readonly writeEnabled = false,
+    private readonly fault?: JournalFault
+  ) {
+    if (fault && process.env.NODE_ENV !== "test")
+      throw new Error("registry failpoints are test-only");
+  }
   private baselineServices() {
     const values = JSON.parse(readFileSync(this.baseline, "utf8")) as Record<
       string,
@@ -164,7 +173,7 @@ export class ServiceRegistry {
   async register(value: unknown): Promise<ServiceDefinition> {
     if (!this.writeEnabled) throw new Error("onboarding writes disabled");
     const service = normalizeService(value);
-    mkdirSync(dirname(this.overlay), { recursive: true });
+    ensureDurableDirectory(dirname(this.overlay));
     const lock = `${this.overlay}.lock`;
     let descriptor: number | undefined;
     for (let attempt = 0; attempt < 50; attempt++) {
@@ -193,15 +202,22 @@ export class ServiceRegistry {
       if (bytes.length > 1_048_576 || local.length >= 500)
         throw new Error("registry capacity reached");
       temporary = `${this.overlay}.${randomUUID()}.tmp`;
+      this.fault?.("before_temp_write", this.overlay);
       const fd = openSync(temporary, "wx", 0o600);
       try {
         writeFileSync(fd, bytes);
+        this.fault?.("after_temp_write", this.overlay);
+        this.fault?.("before_fsync", this.overlay);
         fsyncSync(fd);
+        this.fault?.("after_fsync", this.overlay);
       } finally {
         closeSync(fd);
       }
+      this.fault?.("before_rename", this.overlay);
       renameSync(temporary, this.overlay);
       temporary = undefined;
+      syncDirectory(dirname(this.overlay));
+      this.fault?.("after_rename", this.overlay);
       const saved = this.local().find((v) => v.id === service.id);
       if (!saved || hashCanonical(saved) !== hashCanonical(service))
         throw new Error("registry read-back failed");

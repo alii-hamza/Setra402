@@ -265,9 +265,12 @@ describe("live MCP L2 with deterministic seller/source fixtures and real chain/s
         isPrivate: false,
         input: { fixture },
       });
-      expect(result.status).toBe(
-        fixture === "valid" ? "settled" : "verification_failed"
-      );
+      expect(
+        result.status,
+        JSON.stringify(result, (_, value) =>
+          typeof value === "bigint" ? value.toString() : value
+        )
+      ).toBe(fixture === "valid" ? "settled" : "verification_failed");
       expect(
         (await chain.fetchTaskState(new PublicKey(result.quote.taskStatePda)))
           ?.status

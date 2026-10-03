@@ -1,5 +1,5 @@
 import { PublicKey } from "@solana/web3.js";
-import { InvalidQuote } from "../errors.js";
+import { InvalidQuote, TransactionSubmissionError } from "../errors.js";
 import { hashCanonical } from "../manifest/hash.js";
 import type { ManifestStore, StoredManifest } from "../manifest/store.js";
 import type { TaskManifestV1, TaskQuote, TaskStateView } from "../types.js";
@@ -29,6 +29,8 @@ export interface EscrowChain {
   requireBuyerAta(mint: PublicKey): Promise<PublicKey>;
   tokenBalance(address: PublicKey): Promise<bigint>;
   initializeTaskWithMemo(input: InitializeTaskInput): Promise<string>;
+  confirmSignature?(signature: string): Promise<boolean>;
+  verifyManifestMemo?(signature: string, expectedHash: string): Promise<void>;
 }
 
 export interface EnsureFundedInput {
@@ -81,12 +83,19 @@ export class EscrowCoordinator {
     private readonly manifests: ManifestStore
   ) {}
 
-  async ensureFunded(input: EnsureFundedInput): Promise<FundedEscrow> {
+  async ensureFunded(
+    input: EnsureFundedInput,
+    requireExisting = false
+  ): Promise<FundedEscrow> {
     assertHexHash("policyHash", input.policyHash);
     const quote = input.quote;
     const taskState = new PublicKey(quote.taskStatePda);
     const sellerTokenAccount = new PublicKey(quote.sellerTokenAccount);
     const existing = await this.chain.fetchTaskState(taskState);
+    if (requireExisting && !existing)
+      throw new InvalidQuote(
+        "funding receipt requires an existing TaskState; reconciliation required"
+      );
     const sellerOwner = await this.chain.resolveTokenAccountOwner(
       sellerTokenAccount,
       new PublicKey(quote.mint)
@@ -127,6 +136,18 @@ export class EscrowCoordinator {
         throw new InvalidQuote(
           "funded task is missing its initialization memo signature"
         );
+      if (
+        this.chain.confirmSignature &&
+        !(await this.chain.confirmSignature(record.initializeSignature))
+      )
+        throw new TransactionSubmissionError(
+          "funding signature requires reconciliation",
+          record.initializeSignature
+        );
+      await this.chain.verifyManifestMemo?.(
+        record.initializeSignature,
+        record.manifestHash
+      );
       return {
         state: existing,
         record,
@@ -169,6 +190,8 @@ export class EscrowCoordinator {
         },
       });
     } catch (error) {
+      // Memo validation and other deterministic failures must not be suppressed.
+      if (!(error instanceof TransactionSubmissionError)) throw error;
       const recovered = await this.chain.fetchTaskState(taskState);
       if (!recovered) throw error;
       assertFundedState(recovered, quote, this.chain.buyer, sellerOwner);
@@ -176,6 +199,10 @@ export class EscrowCoordinator {
         throw new InvalidQuote(
           "task was funded but the initialization signature is unavailable"
         );
+      if (!(await this.chain.confirmSignature?.(initializeSignature)))
+        throw error;
+      if (!this.chain.verifyManifestMemo) throw error;
+      await this.chain.verifyManifestMemo(initializeSignature, manifestHash);
       return { state: recovered, record, initializeSignature };
     }
 

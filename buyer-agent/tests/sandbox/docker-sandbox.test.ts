@@ -92,10 +92,20 @@ describe("real isolated Docker artifact execution", () => {
     assertClean();
   }, 30_000);
   it("bounds PID creation", async () => {
-    const code =
-      "import {spawn} from 'node:child_process'; for(let i=0;i<100;i++) {spawn('/bin/sleep',['10'],{stdio:'ignore'}).on('error',e=>{if(e.code==='EAGAIN') process.exit(23);});} setTimeout(()=>process.exit(1),2000);";
+    // Poll the kernel PID controller directly so the test observes the cgroup
+    // denial promptly instead of depending on child-process error scheduling.
+    const code = String.raw`printf '%s\n' 'denied() {' '  while read key value rest; do' '    if [ "$key" = max ]; then' '      printf "%s\\n" "$value"' '      return' '    fi' '  done < /sys/fs/cgroup/pids.events' '}' 'before=$(denied)' 'i=0' 'while [ "$i" -lt 100 ]; do' '  /bin/sleep 10 &' '  i=$((i + 1))' '  current=$(denied)' '  if [ "$current" -gt "$before" ]; then' '    exit 23' '  fi' 'done' 'exit 1' >/work/pid-child
+/bin/sh /work/pid-child 2>/work/pid-error
+code=$?
+while IFS= read -r line; do
+  case "$line" in
+    *"can't fork"*) exit 23 ;;
+  esac
+done < /work/pid-error
+exit "$code"
+`;
     const run = await sandbox.execute(
-      { ...profile, command: ["node", "/tmp/artifact.mjs"] },
+      { ...profile, command: ["/bin/sh", "/tmp/artifact.mjs"] },
       Buffer.from(code),
       10
     );

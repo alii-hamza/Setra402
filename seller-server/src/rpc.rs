@@ -49,6 +49,22 @@ impl RpcClient {
         }
     }
 
+    pub async fn get_chain_unix_time(&self) -> Result<i64, RpcError> {
+        let clock = "SysvarC1ock11111111111111111111111111111111"
+            .parse::<Pubkey>()
+            .map_err(|_| RpcError::MalformedResponse)?;
+        let bytes = self
+            .get_account_data(&clock)
+            .await?
+            .ok_or(RpcError::MalformedResponse)?;
+        let timestamp: [u8; 8] = bytes
+            .get(32..40)
+            .ok_or(RpcError::MalformedResponse)?
+            .try_into()
+            .map_err(|_| RpcError::MalformedResponse)?;
+        Ok(i64::from_le_bytes(timestamp))
+    }
+
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         let request_body = json!({
             "jsonrpc": "2.0",
@@ -81,7 +97,7 @@ impl RpcClient {
         // the request when the client sends FIN before the response is written,
         // returning an empty body that fails to parse. `Connection: close` in
         // the request headers already tells the server to close after responding.
-        
+
         // stream.shutdown().await.ok();
 
         let mut raw = Vec::new();
@@ -163,7 +179,10 @@ mod tests {
     async fn returns_none_when_account_does_not_exist() {
         let (host, port) = fake_rpc_server(json!({"context": {"slot": 1}, "value": null})).await;
         let client = RpcClient::new(host, port);
-        let result = client.get_account_data(&Pubkey::new_unique()).await.unwrap();
+        let result = client
+            .get_account_data(&Pubkey::new_unique())
+            .await
+            .unwrap();
         assert_eq!(result, None);
     }
 
@@ -177,7 +196,10 @@ mod tests {
         }))
         .await;
         let client = RpcClient::new(host, port);
-        let result = client.get_account_data(&Pubkey::new_unique()).await.unwrap();
+        let result = client
+            .get_account_data(&Pubkey::new_unique())
+            .await
+            .unwrap();
         assert_eq!(result, Some(raw_bytes));
     }
 
@@ -222,7 +244,10 @@ mod tests {
         });
 
         let client = RpcClient::new(addr.ip().to_string(), addr.port());
-        client.get_account_data(&Pubkey::new_unique()).await.unwrap();
+        client
+            .get_account_data(&Pubkey::new_unique())
+            .await
+            .unwrap();
         let request = request_rx.await.unwrap();
         assert!(request.contains("\"commitment\":\"confirmed\""));
     }

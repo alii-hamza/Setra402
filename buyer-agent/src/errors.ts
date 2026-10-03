@@ -80,7 +80,17 @@ export class ReplayDetected extends SetraError {
 
 export class TransactionSubmissionError extends SetraError {
   constructor(message: string, readonly signature: string, details?: unknown) {
-    super(message, "retry", details);
+    super(message, "operator", details);
+  }
+}
+
+export class ReconciliationRequired extends SetraError {
+  constructor(
+    message: string,
+    readonly classification: string,
+    details?: unknown
+  ) {
+    super(message, "operator", details);
   }
 }
 

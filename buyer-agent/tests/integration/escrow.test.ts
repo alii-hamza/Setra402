@@ -7,6 +7,8 @@ import { EscrowCoordinator, type EscrowChain } from "../../src/chain/escrow.js";
 import { ManifestStore } from "../../src/manifest/store.js";
 import type { TaskQuote, TaskStateView } from "../../src/types.js";
 import { hashCanonical } from "../../src/manifest/hash.js";
+import { TransactionSubmissionError } from "../../src/errors.js";
+import { ProtectedTaskController } from "../../src/core/task-controller.js";
 
 const policy = {
   version: "1",
@@ -77,6 +79,10 @@ function fakeChain(options: { initializationFails?: boolean } = {}) {
   let reads = 0;
   const chain: EscrowChain = {
     buyer,
+    async confirmSignature() {
+      return true;
+    },
+    async verifyManifestMemo() {},
     async fetchTaskState() {
       calls.push("fetchTaskState");
       reads += 1;
@@ -99,7 +105,11 @@ function fakeChain(options: { initializationFails?: boolean } = {}) {
       expect(input.seller.equals(sellerOwner)).toBe(true);
       expect(input.buyerTokenAccount.equals(buyerAta)).toBe(true);
       input.onSigned?.("init-signature");
-      if (options.initializationFails) throw new Error("ambiguous RPC failure");
+      if (options.initializationFails)
+        throw new TransactionSubmissionError(
+          "ambiguous RPC failure",
+          "init-signature"
+        );
       return "init-signature";
     },
   };
@@ -107,6 +117,87 @@ function fakeChain(options: { initializationFails?: boolean } = {}) {
 }
 
 describe("escrow funding coordination", () => {
+  it.each(["confirmation", "memo"])(
+    "controller cached receipt reaches real escrow %s validation",
+    async (kind) => {
+      const { chain, calls } = fakeChain();
+      const directory = mkdtempSync(join(tmpdir(), "setra35-funding-"));
+      const escrow = new EscrowCoordinator(
+        chain,
+        new ManifestStore(join(directory, "manifests"))
+      );
+      const funding = {
+        quote,
+        serviceId: quote.serviceId,
+        input: {},
+        policyHash,
+      };
+      let state: TaskStateView | null = null;
+      const deps = {
+        async quote() {
+          return quote;
+        },
+        normalizeQuote() {
+          return quote;
+        },
+        async state() {
+          return state;
+        },
+        async now() {
+          return 50;
+        },
+        async fund() {
+          const result = await escrow.ensureFunded(funding);
+          state = result.state;
+          return result;
+        },
+        async validateFundingReceipt() {
+          await escrow.ensureFunded(funding, true);
+        },
+        async run() {
+          throw new Error("not used");
+        },
+        async refund() {
+          throw new Error("not used");
+        },
+      };
+      const call = {
+        buyer: buyer.toBase58(),
+        task_id: "42",
+        service_id: quote.serviceId,
+        input: {},
+        is_private: false,
+        transport: "REST",
+      };
+      await new ProtectedTaskController(directory, deps).fund(call);
+      if (kind === "confirmation") chain.confirmSignature = async () => false;
+      else
+        chain.verifyManifestMemo = async () => {
+          throw new Error("memo mismatch");
+        };
+      await expect(
+        new ProtectedTaskController(directory, deps).fund({
+          ...call,
+          transport: "MCP",
+        })
+      ).rejects.toThrow(kind === "confirmation" ? /reconciliation/ : /memo/);
+      expect(calls.filter((c) => c === "initializeTask")).toHaveLength(1);
+    }
+  );
+  it("read-only cached receipt validation cannot initialize an absent TaskState", async () => {
+    const { chain, calls } = fakeChain();
+    const escrow = new EscrowCoordinator(
+      chain,
+      new ManifestStore(mkdtempSync(join(tmpdir(), "setra35-readonly-")))
+    );
+    await expect(
+      escrow.ensureFunded(
+        { quote, serviceId: quote.serviceId, input: {}, policyHash },
+        true
+      )
+    ).rejects.toThrow(/existing TaskState/);
+    expect(calls).not.toContain("initializeTask");
+  });
   it("resolves seller owner, uses buyer ATA, confirms, and re-reads TaskState", async () => {
     const { chain, calls } = fakeChain();
     const directory = mkdtempSync(join(tmpdir(), "setra402-manifests-"));
@@ -128,9 +219,11 @@ describe("escrow funding coordination", () => {
       "initializeTask",
       "fetchTaskState",
     ]);
-    const stored = JSON.parse(
+    const envelope = JSON.parse(
       readFileSync(join(directory, `${taskState.toBase58()}.json`), "utf8")
     );
+    expect(envelope.checksum).toMatch(/^[0-9a-f]{64}$/);
+    const stored = envelope.value;
     expect(stored.manifest.sellerOwner).toBe(sellerOwner.toBase58());
     expect(stored.initializeSignature).toBe("init-signature");
   });
@@ -179,4 +272,27 @@ describe("escrow funding coordination", () => {
       })
     ).rejects.toThrow(/manifest/i);
   });
+
+  it.each([false, true])(
+    "ambiguous funding requires confirmation and memo evidence (confirmed=%s)",
+    async (confirmed) => {
+      const { chain } = fakeChain({ initializationFails: true });
+      chain.confirmSignature = async () => confirmed;
+      chain.verifyManifestMemo = async () => {
+        throw new Error("memo mismatch");
+      };
+      const coordinator = new EscrowCoordinator(
+        chain,
+        new ManifestStore(mkdtempSync(join(tmpdir(), "setra35-receipt-")))
+      );
+      await expect(
+        coordinator.ensureFunded({
+          quote,
+          serviceId: "legacy-rest",
+          input: {},
+          policyHash,
+        })
+      ).rejects.toThrow(confirmed ? /memo/ : /ambiguous/);
+    }
+  );
 });

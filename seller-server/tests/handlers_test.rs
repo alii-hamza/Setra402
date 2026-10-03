@@ -152,9 +152,15 @@ use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 const TASK_ID: u64 = 7;
 const PRICE: u64 = 1_500_000;
 
+#[path = "support/phase35_handlers.rs"]
+mod phase35;
+
 /// Starts a fake JSON-RPC endpoint that always answers `getAccountInfo`
 /// with the given `value`, then returns an `AppState` wired to talk to it.
 async fn state_with_fake_chain(value: Value) -> AppState {
+    state_with_fake_chain_clock(value, None).await
+}
+async fn state_with_fake_chain_clock(value: Value, clock: Option<i64>) -> AppState {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -166,7 +172,22 @@ async fn state_with_fake_chain(value: Value) -> AppState {
             let value = value.clone();
             tokio::spawn(async move {
                 let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
+                let read = socket.read(&mut buf).await.unwrap();
+                let value = if String::from_utf8_lossy(&buf[..read])
+                    .contains("SysvarC1ock11111111111111111111111111111111")
+                {
+                    let time = clock.unwrap_or_else(|| {
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs() as i64
+                    });
+                    let mut data = vec![0u8; 40];
+                    data[32..40].copy_from_slice(&time.to_le_bytes());
+                    json!({"data":[base64::Engine::encode(&base64::engine::general_purpose::STANDARD,&data),"base64"]})
+                } else {
+                    value
+                };
                 let body = json!({"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": 1}, "value": value}}).to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

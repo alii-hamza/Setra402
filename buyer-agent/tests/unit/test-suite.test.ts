@@ -59,6 +59,14 @@ function context() {
   };
 }
 describe("trusted test-suite boundary", () => {
+  it("rejects artifact bytes changed after the canonical descriptor was committed", async () => {
+    const ctx = context();
+    ctx.loadArtifact = async () => ({
+      bytes: Buffer.from("export const add=()=>999;"),
+    });
+    expect((await checkTestSuite(policy, evidence, ctx)).passed).toBe(false);
+    expect(ctx.sandbox.execute).not.toHaveBeenCalled();
+  });
   it("runs the committed trusted bundle and artifact", async () => {
     const ctx = context();
     expect((await checkTestSuite(policy, evidence, ctx)).passed).toBe(true);

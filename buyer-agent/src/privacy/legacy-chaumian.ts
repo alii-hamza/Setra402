@@ -1,6 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { ristretto255 } from "@noble/curves/ed25519.js";
 import { VerificationFailed } from "../errors.js";
+import { ReconciliationRequired } from "../errors.js";
+import { DurableJournal } from "../core/journal.js";
+import { hashCanonical } from "../manifest/hash.js";
+import { resolve, join } from "node:path";
 
 export interface BlindSignatureResponse {
   blind_signature: string;
@@ -101,7 +105,14 @@ export function verifyBlindSignature(
 }
 
 export class LegacyChaumianClient {
-  constructor(private readonly sellerUrl: string) {}
+  private readonly journal = new DurableJournal();
+  constructor(
+    private readonly sellerUrl: string,
+    private readonly directory = resolve(
+      process.env.SETRA_STATE_DIR ?? ".setra-state",
+      "vouchers"
+    )
+  ) {}
 
   generateNullifier(): Uint8Array {
     return createBlindMaterial().nullifier;
@@ -111,12 +122,62 @@ export class LegacyChaumianClient {
     buyer: string;
     taskId: bigint;
   }): Promise<LegacyBlindVoucher> {
+    const id = hashCanonical({
+      seller: this.sellerUrl,
+      buyer: input.buyer,
+      taskId: input.taskId.toString(),
+    });
+    const intentPath = join(this.directory, `${id}.intent`);
+    const resultPath = join(this.directory, `${id}.voucher.json`);
+    const prior = this.journal.read(intentPath) as {
+      nullifierScalar: string;
+      blindingScalar: string;
+      blindedPointHex: string;
+    } | null;
+    const saved = this.journal.read(
+      resultPath
+    ) as BlindSignatureResponse | null;
+    if (!prior && saved)
+      throw new ReconciliationRequired(
+        "orphan voucher requires reconciliation",
+        "UNKNOWN_EXTERNAL_EFFECT"
+      );
+    if (prior) {
+      if (!saved)
+        throw new ReconciliationRequired(
+          "voucher issuance outcome unknown; no replacement permitted",
+          "UNKNOWN_EXTERNAL_EFFECT"
+        );
+      const original = createBlindMaterial({
+        nullifierScalar: BigInt(prior.nullifierScalar),
+        blindingScalar: BigInt(prior.blindingScalar),
+      });
+      if (original.blindedPointHex !== prior.blindedPointHex)
+        throw new ReconciliationRequired(
+          "voucher intent corrupted",
+          "RECONCILIATION_REQUIRED"
+        );
+      return verifyBlindSignature(original, saved);
+    }
     const material = createBlindMaterial();
+    if (
+      !this.journal.publish(intentPath, {
+        nullifierScalar: material.nullifierScalar.toString(),
+        blindingScalar: material.blindingScalar.toString(),
+        blindedPointHex: material.blindedPointHex,
+      })
+    )
+      throw new ReconciliationRequired(
+        "voucher issuance already claimed; reconciliation required",
+        "UNKNOWN_EXTERNAL_EFFECT"
+      );
     const response = await this.requestBlindSignature({
       ...input,
       blindedPointHex: material.blindedPointHex,
     });
-    return verifyBlindSignature(material, response);
+    const voucher = verifyBlindSignature(material, response);
+    this.journal.publish(resultPath, response);
+    return voucher;
   }
 
   async requestBlindSignature(input: {
@@ -139,6 +200,7 @@ export class LegacyChaumianClient {
           task_id: Number(input.taskId),
           blinded_point: input.blindedPointHex,
         }),
+        signal: AbortSignal.timeout(10_000),
       }
     );
     if (!response.ok)

@@ -17,6 +17,12 @@ import type { TaskStateView, TaskStatus } from "../types.js";
 import { encodeManifestMemo, MEMO_PROGRAM_ID } from "./memo.js";
 import { deriveBuyerAta, deriveNullifierPda } from "./pda.js";
 import type { EscrowChain, InitializeTaskInput } from "./escrow.js";
+import { resolve } from "node:path";
+import { hashCanonical } from "../manifest/hash.js";
+import {
+  FinancialJournal,
+  type PreparedTransaction,
+} from "./financial-journal.js";
 
 function statusName(status: unknown): TaskStatus {
   if (!status || typeof status !== "object")
@@ -52,6 +58,7 @@ export interface ChainClientOptions {
   verifier: Keypair;
   protocolTreasury: PublicKey;
   maxSendAttempts?: number;
+  transactionDirectory?: string;
 }
 
 export interface SendRebuiltTransactionOptions {
@@ -61,6 +68,8 @@ export interface SendRebuiltTransactionOptions {
   signers: Signer[];
   maxAttempts: number;
   onSigned?: (signature: string) => void;
+  onPrepared?: (transaction: PreparedTransaction) => void;
+  canRebuild?: (minimumSlot: number) => Promise<boolean>;
 }
 
 export async function sendRebuiltTransaction(
@@ -81,6 +90,23 @@ export async function sendRebuiltTransaction(
     if (!transaction.signature)
       throw new Error("signed transaction has no payer signature");
     const expectedSignature = bs58.encode(transaction.signature);
+    options.onPrepared?.({
+      signature: expectedSignature,
+      blockhash: latest.blockhash,
+      lastValidBlockHeight: latest.lastValidBlockHeight,
+      fingerprint: hashCanonical(
+        transaction.instructions.map((instruction) => ({
+          program: instruction.programId.toBase58(),
+          accounts: instruction.keys.map((key) => ({
+            pubkey: key.pubkey.toBase58(),
+            signer: key.isSigner,
+            writable: key.isWritable,
+          })),
+          data: instruction.data.toString("hex"),
+        }))
+      ),
+      signedAtUnix: Math.floor(Date.now() / 1000),
+    });
     options.onSigned?.(expectedSignature);
     let signature = expectedSignature;
     try {
@@ -110,14 +136,51 @@ export async function sendRebuiltTransaction(
         const status = await options.connection.getSignatureStatus(signature, {
           searchTransactionHistory: true,
         });
-        if (status.value?.err === null) return signature;
-        knownFailure = status.value !== null;
+        if (
+          status.value?.err === null &&
+          (status.value.confirmationStatus === "confirmed" ||
+            status.value.confirmationStatus === "finalized")
+        )
+          return signature;
+        knownFailure =
+          status.value !== null &&
+          status.value.err !== null &&
+          (status.value.confirmationStatus === "confirmed" ||
+            status.value.confirmationStatus === "finalized");
       } catch {
         // The signature remains usable for state-based ambiguity recovery.
       }
       lastError = error;
       if (knownFailure) break;
-      if (staleBlockhash(error) && attempt < options.maxAttempts) continue;
+      if (staleBlockhash(error) && attempt < options.maxAttempts) {
+        // An RPC error string cannot establish expiry. Query a rooted height,
+        // then query history again after that fence before rebuilding.
+        try {
+          const fence = await options.connection.getSlot("finalized");
+          const block = await options.connection.getParsedBlock(fence, {
+            commitment: "finalized",
+            transactionDetails: "none",
+            rewards: false,
+            maxSupportedTransactionVersion: 0,
+          });
+          const height = block?.blockHeight;
+          const afterExpiry = await options.connection.getSignatureStatus(
+            signature,
+            { searchTransactionHistory: true }
+          );
+          if (
+            height !== undefined &&
+            height !== null &&
+            height > latest.lastValidBlockHeight &&
+            afterExpiry.value === null &&
+            afterExpiry.context.slot >= fence &&
+            (await options.canRebuild?.(fence))
+          )
+            continue;
+        } catch {
+          /* Unavailable evidence remains ambiguous. */
+        }
+      }
       throw new TransactionSubmissionError(
         `transaction ${signature} has an ambiguous submission result`,
         signature,
@@ -134,11 +197,16 @@ export class ChainClient implements EscrowChain {
   readonly program: Program;
   private readonly memoProgram = new PublicKey(MEMO_PROGRAM_ID);
   private readonly maxSendAttempts: number;
+  private readonly financial: FinancialJournal;
 
   constructor(private readonly options: ChainClientOptions) {
     this.buyer = options.buyer.publicKey;
     this.verifier = options.verifier.publicKey;
     this.maxSendAttempts = options.maxSendAttempts ?? 2;
+    this.financial = new FinancialJournal(
+      options.transactionDirectory ??
+        resolve(process.env.SETRA_STATE_DIR ?? ".setra-state", "transactions")
+    );
     if (!Number.isSafeInteger(this.maxSendAttempts) || this.maxSendAttempts < 1)
       throw new RangeError("maxSendAttempts must be a positive safe integer");
     const idlAddress =
@@ -156,9 +224,29 @@ export class ChainClient implements EscrowChain {
   }
 
   async fetchTaskState(address: PublicKey): Promise<TaskStateView | null> {
-    const account = await (this.program.account as any).taskState.fetchNullable(
-      address
+    return (await this.fetchTaskEvidence(address)).state;
+  }
+  private async fetchTaskEvidence(address: PublicKey, minimumSlot?: number) {
+    const response = await this.options.connection.getAccountInfoAndContext(
+      address,
+      {
+        commitment: "confirmed",
+        ...(minimumSlot === undefined ? {} : { minContextSlot: minimumSlot }),
+      }
     );
+    if (minimumSlot !== undefined && response.context.slot < minimumSlot)
+      throw new Error("RPC task evidence is older than the recovery fence");
+    if (response.value && !response.value.owner.equals(this.options.programId))
+      throw new Error("TaskState account owner mismatch");
+    const account = response.value
+      ? this.program.coder.accounts.decode<any>(
+          "taskState",
+          response.value.data
+        )
+      : null;
+    return { slot: response.context.slot, state: this.taskView(account) };
+  }
+  private taskView(account: any): TaskStateView | null {
     if (!account) return null;
     return {
       buyer: account.buyer.toBase58(),
@@ -217,11 +305,22 @@ export class ChainClient implements EscrowChain {
     );
   }
 
-  async getChainUnixTime(): Promise<number> {
-    const clock = await this.options.connection.getAccountInfo(
-      SYSVAR_CLOCK_PUBKEY,
-      "confirmed"
-    );
+  async getChainUnixTime(minimumSlot?: number): Promise<number> {
+    const fenced =
+      minimumSlot === undefined
+        ? null
+        : await this.options.connection.getAccountInfoAndContext(
+            SYSVAR_CLOCK_PUBKEY,
+            { commitment: "confirmed", minContextSlot: minimumSlot }
+          );
+    if (fenced && fenced.context.slot < minimumSlot!)
+      throw new Error("RPC clock evidence is older than the recovery fence");
+    const clock = fenced
+      ? fenced.value
+      : await this.options.connection.getAccountInfo(
+          SYSVAR_CLOCK_PUBKEY,
+          "confirmed"
+        );
     if (!clock || clock.data.length < 40)
       throw new Error("Solana Clock sysvar is unavailable or malformed");
     const unixTimestamp = clock.data.readBigInt64LE(32);
@@ -232,7 +331,7 @@ export class ChainClient implements EscrowChain {
   }
 
   async initializeTaskWithMemo(input: InitializeTaskInput): Promise<string> {
-    return this.sendRebuilt(
+    const signature = await this.sendRebuilt(
       async () => {
         const initialize = await (this.program.methods as any)
           .initializeTask(
@@ -262,8 +361,23 @@ export class ChainClient implements EscrowChain {
       },
       this.options.buyer,
       [this.options.buyer],
+      {
+        kind: "funding",
+        taskState: input.taskState,
+        expected: {
+          buyer: this.buyer.toBase58(),
+          seller: input.seller.toBase58(),
+          verifier: input.verifier.toBase58(),
+          mint: input.mint.toBase58(),
+          taskId: input.taskId,
+          amount: input.amount,
+          isPrivate: input.isPrivate,
+        },
+      },
       input.onSigned
     );
+    await this.verifyManifestMemo(signature, input.manifestHash);
+    return signature;
   }
 
   async settlePublic(
@@ -287,7 +401,8 @@ export class ChainClient implements EscrowChain {
           .instruction(),
       ],
       this.options.verifier,
-      [this.options.verifier]
+      [this.options.verifier],
+      { kind: "settlement", taskState }
     );
   }
 
@@ -319,7 +434,8 @@ export class ChainClient implements EscrowChain {
           .instruction(),
       ],
       this.options.verifier,
-      [this.options.verifier]
+      [this.options.verifier],
+      { kind: "settlement", taskState, nullifier }
     );
   }
 
@@ -342,7 +458,8 @@ export class ChainClient implements EscrowChain {
           .instruction(),
       ],
       this.options.buyer,
-      [this.options.buyer]
+      [this.options.buyer],
+      { kind: "refund", taskState }
     );
   }
 
@@ -367,8 +484,26 @@ export class ChainClient implements EscrowChain {
           .instruction(),
       ],
       this.options.buyer,
-      [this.options.buyer]
+      [this.options.buyer],
+      { kind: "cancel", taskState }
     );
+  }
+
+  async confirmSignature(signature: string): Promise<boolean> {
+    try {
+      const { value } = await this.options.connection.getSignatureStatus(
+        signature,
+        { searchTransactionHistory: true }
+      );
+      return (
+        value !== null &&
+        value.err === null &&
+        (value.confirmationStatus === "confirmed" ||
+          value.confirmationStatus === "finalized")
+      );
+    } catch {
+      return false;
+    }
   }
 
   async verifyManifestMemo(
@@ -384,6 +519,8 @@ export class ChainClient implements EscrowChain {
     );
     if (!transaction)
       throw new ManifestMismatch("initialize transaction is unavailable");
+    if (!transaction.meta || transaction.meta.err !== null)
+      throw new ManifestMismatch("initialize transaction did not succeed");
     const memos: string[] = [];
     for (const instruction of transaction.transaction.message.instructions) {
       if (!instruction.programId.equals(this.memoProgram)) continue;
@@ -424,15 +561,74 @@ export class ChainClient implements EscrowChain {
     buildInstructions: () => Promise<TransactionInstruction[]>,
     payer: Keypair,
     signers: Signer[],
+    operation: {
+      kind: "funding" | "settlement" | "refund" | "cancel";
+      taskState: PublicKey;
+      nullifier?: Uint8Array;
+      expected?: Partial<TaskStateView>;
+    },
     onSigned?: (signature: string) => void
   ): Promise<string> {
-    return sendRebuiltTransaction({
-      connection: this.options.connection,
-      buildInstructions,
-      payer,
-      signers,
-      maxAttempts: this.maxSendAttempts,
-      ...(onSigned ? { onSigned } : {}),
-    });
+    const instructions = await buildInstructions();
+    const binding = hashCanonical(
+      instructions.map((instruction) => ({
+        program: instruction.programId.toBase58(),
+        accounts: instruction.keys.map((key) => ({
+          pubkey: key.pubkey.toBase58(),
+          signer: key.isSigner,
+          writable: key.isWritable,
+        })),
+        data: instruction.data.toString("hex"),
+      }))
+    );
+    const identity = {
+      programId: this.options.programId.toBase58(),
+      taskState: operation.taskState.toBase58(),
+      kind: operation.kind,
+      binding,
+    };
+    const account = async (minimumSlot?: number) => {
+      const { state, slot } = await this.fetchTaskEvidence(
+        operation.taskState,
+        minimumSlot
+      );
+      const now = state ? await this.getChainUnixTime(minimumSlot) : 0;
+      const completed =
+        operation.kind === "funding"
+          ? !!state &&
+            Object.entries(operation.expected ?? {}).every(
+              ([key, value]) => state[key as keyof TaskStateView] === value
+            )
+          : operation.kind === "settlement"
+          ? state?.status === "settled" &&
+            (!operation.nullifier ||
+              !!(await this.fetchNullifierRecord(operation.nullifier)))
+          : state?.status === "refunded";
+      const permits =
+        operation.kind === "funding"
+          ? !state
+          : state?.status === "pending" &&
+            (operation.kind === "refund"
+              ? now >= state.deadlineUnix
+              : now < state.deadlineUnix);
+      return { completed, permits, state, slot };
+    };
+    return this.financial.run(
+      identity,
+      this.options.connection,
+      account,
+      (persist) =>
+        sendRebuiltTransaction({
+          connection: this.options.connection,
+          buildInstructions: async () => instructions,
+          payer,
+          signers,
+          maxAttempts: this.maxSendAttempts,
+          onPrepared: persist,
+          canRebuild: async (minimumSlot) =>
+            (await account(minimumSlot)).permits,
+          ...(onSigned ? { onSigned } : {}),
+        })
+    );
   }
 }

@@ -22,6 +22,8 @@ import { DockerSandbox } from "../verification/level2/docker-sandbox.js";
 import { SourceClient } from "../verification/level2/source-client.js";
 import { FileChallengeStore } from "../verification/level2/challenge-store.js";
 import { ProtectedTaskController } from "./task-controller.js";
+import { RunCheckpoints } from "./run-checkpoints.js";
+import { normalizeResult } from "../transport/rest-x402.js";
 
 export interface RuntimeOptions {
   config?: BuyerAgentConfig;
@@ -51,12 +53,16 @@ export function createRuntime(options: RuntimeOptions = {}) {
     buyer: config.buyer,
     verifier: config.verifier,
     protocolTreasury: config.protocolTreasuryAddress,
+    transactionDirectory: join(directory, "transactions"),
   });
   const escrow = new EscrowCoordinator(
     chain,
     new ManifestStore(join(directory, "manifests"))
   );
-  const privacy = new LegacyChaumianClient(config.sellerUrl);
+  const privacy = new LegacyChaumianClient(
+    config.sellerUrl,
+    join(directory, "vouchers")
+  );
   const settlement = new SettlementCoordinator(
     chain,
     config.settlementSafetyMarginSec,
@@ -85,10 +91,42 @@ export function createRuntime(options: RuntimeOptions = {}) {
   const sandbox = options.sandbox ?? new DockerSandbox();
   const runners = defaultRunners(),
     challenges = new FileChallengeStore(join(directory, "challenges"));
+  const checkpoints = new RunCheckpoints(join(directory, "checkpoints"));
   const controller = new ProtectedTaskController(join(directory, "tasks"), {
     normalizeQuote,
+    canResume: (input, quote) => checkpoints.loadResult(input, quote) !== null,
+    checkpointOutcome: (input, quote) => checkpoints.outcome(input, quote),
+    async recoverResult(input, quote) {
+      // Read-only durable seller evidence. Never POST merely because the
+      // previous response was lost and the execution intent is unresolved.
+      const response = await fetch(
+        `${config.sellerUrl}/tasks/${
+          input.taskId
+        }/result?buyer=${encodeURIComponent(input.buyer)}`,
+        { signal: AbortSignal.timeout(10_000) }
+      );
+      if (!response.ok) return false;
+      checkpoints.saveResult(
+        input,
+        quote,
+        normalizeResult(await response.json())
+      );
+      return true;
+    },
     async quote(input, transport) {
       return transports[transport].requestQuote(input);
+    },
+    async validateFundingReceipt(quote, input) {
+      // Existing-state branch checks the signed initialization/memo without sending.
+      await escrow.ensureFunded(
+        {
+          quote,
+          serviceId: quote.serviceId,
+          input: input.input,
+          policyHash: quote.policyHash,
+        },
+        true
+      );
     },
     async fund(quote, input) {
       if (input.buyer !== config.buyer.publicKey.toBase58())
@@ -144,11 +182,30 @@ export function createRuntime(options: RuntimeOptions = {}) {
             return quote;
           },
           executeFundedTask: (input) =>
-            transports[transport].executeFundedTask(input),
+            (async () => {
+              const saved = checkpoints.loadResult(input, quote);
+              if (saved) return saved;
+              return checkpoints.saveResult(
+                input,
+                quote,
+                await transports[transport].executeFundedTask(input)
+              );
+            })(),
         },
         escrow,
         settlement,
-        verification,
+        {
+          async verify(manifest, policy, result, record) {
+            const report = await verification.verify(
+              manifest,
+              policy,
+              result,
+              record
+            );
+            checkpoints.saveReport(input, quote, record, report);
+            return report;
+          },
+        },
         privacy
       ).run({ ...input, serviceId: quote.serviceId });
     },
