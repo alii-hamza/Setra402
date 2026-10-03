@@ -1293,6 +1293,12 @@ export function scanRecoveryInventory(
       task.recommendedAction = "SAFE_TO_REVERIFY";
     else task.recommendedAction = "NO_ACTION";
   }
+  // V1 leases carry no task key. A lease from a killed verifier may belong to
+  // any candidate, so no individual task may advertise safe re-verification.
+  if (unattached.some((record) => record.family === "sandboxLease"))
+    for (const task of tasks.values())
+      if (task.recommendedAction === "SAFE_TO_REVERIFY")
+        task.recommendedAction = "READ_ONLY_RECONCILIATION";
   return recoveryInventoryV1Schema.parse({
     version: "1",
     families,

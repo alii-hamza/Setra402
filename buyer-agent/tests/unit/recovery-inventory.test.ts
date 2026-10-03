@@ -10,6 +10,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import { Keypair } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import { DurableJournal } from "../../src/core/journal.js";
@@ -17,6 +19,7 @@ import { scanRecoveryInventory } from "../../src/core/recovery-inventory.js";
 import { deriveTaskPda, deriveVaultPda } from "../../src/chain/pda.js";
 import { hashCanonical } from "../../src/manifest/hash.js";
 import { ManifestStore } from "../../src/manifest/store.js";
+import { inspectVerificationRecovery } from "../../src/verification/recovery.js";
 
 const journal = new DurableJournal();
 const key = () => Keypair.generate().publicKey.toBase58();
@@ -673,6 +676,127 @@ describe("Phase 4A.1 recovery inventory (local evidence only)", () => {
         "UNKNOWN_EXTERNAL_EFFECT",
         "UNKNOWN_FINANCIAL_OUTCOME",
       ])
+    );
+  });
+});
+
+describe("4A.5 verification and sandbox recovery (ACTUAL journals, no execution)", () => {
+  const view = (
+    f: ReturnType<typeof fixture>,
+    probe?: (pid: number) => "PRESENT" | "ABSENT" | "UNAVAILABLE"
+  ) =>
+    inspectVerificationRecovery(
+      {
+        stateDirectory: f.root,
+        sellerExecutionDirectory: f.seller,
+        sellerUrl: f.sellerUrl,
+        taskKey: f.stem,
+      },
+      probe
+    );
+  it("offers re-verification only for a valid committed result without a report", () => {
+    const f = fixture();
+    f.executed();
+    rmSync(f.path("checkpoints", `${f.checkpointStem}.report.json`));
+    const before = snapshot(f.root);
+    const recovery = view(f);
+    expect(recovery.classification).toBe("SAFE_TO_REVERIFY");
+    expect(recovery.evidence).toMatchObject({
+      result: "VALID",
+      report: "ABSENT",
+      sourceChallenge: "NOT_REQUIRED",
+    });
+    expect(snapshot(f.root)).toEqual(before);
+  });
+  it("records a linked PASS as local evidence, without authorizing settlement or re-verification", () => {
+    const f = fixture();
+    f.executed();
+    const recovery = view(f);
+    expect(recovery.classification).toBe("PROVEN_OCCURRED");
+    expect(recovery.reportVerdict).toBe("PASS_RECORDED");
+    expect(recovery.recommendedAction).toBe("READ_ONLY_RECONCILIATION");
+  });
+  it("keeps a lost provider result unknown and corrupt report linkage closed", () => {
+    const f = fixture();
+    f.executed();
+    rmSync(join(f.root, "checkpoints"), { recursive: true });
+    expect(view(f).classification).toBe("UNKNOWN_EXTERNAL_EFFECT");
+    const g = fixture();
+    g.executed();
+    g.save("checkpoints", `${g.checkpointStem}.report.json`, {
+      ...g.report,
+      resultHash: "f".repeat(64),
+    });
+    expect(view(g).classification).toBe("RECONCILIATION_REQUIRED");
+  });
+  it("requires the same persisted source challenge before re-verification", () => {
+    const f = fixture(false, true);
+    f.executed();
+    rmSync(f.path("checkpoints", `${f.checkpointStem}.report.json`));
+    expect(view(f).evidence.sourceChallenge).toBe("MISSING");
+    expect(view(f).classification).toBe("RECONCILIATION_REQUIRED");
+    const immutableContext = hashCanonical({
+      manifestHash: hashCanonical(f.manifest),
+      policyHash: f.quote.policy_hash,
+      resultHash: f.result.resultHash,
+      checkIndex: 0,
+    });
+    const name = `${hashCanonical({
+      immutableContext,
+      policy: f.quote.verification_policy.checks[0],
+    })}.seed`;
+    mkdirSync(join(f.root, "challenges"), { recursive: true });
+    writeFileSync(f.path("challenges", name), "a".repeat(64));
+    expect(view(f).classification).toBe("SAFE_TO_REVERIFY");
+    writeFileSync(f.path("challenges", name), "truncated");
+    expect(view(f).classification).toBe("RECONCILIATION_REQUIRED");
+  });
+  it("observes owner PID only; an unassigned lease blocks safe re-verification without Docker mutation", () => {
+    const f = fixture();
+    f.executed();
+    rmSync(f.path("checkpoints", `${f.checkpointStem}.report.json`));
+    const prefix = `setra402-verify-${randomUUID()}`;
+    const container = `${prefix}-${randomUUID()}`;
+    const leasePath = f.path("sandbox-leases", `${container}.lease`);
+    f.save("sandbox-leases", `${container}.lease`, {
+      pid: 12345,
+      container,
+      directory: join(tmpdir(), `${prefix}-input-fixture`),
+    });
+    const before = readFileSync(leasePath, "utf8");
+    const absent = view(f, () => "ABSENT");
+    expect(absent.sandboxLeases).toEqual([
+      { container, owner: "PID_ABSENT", containerState: "NOT_QUERIED" },
+    ]);
+    expect(absent.classification).toBe("RECONCILIATION_REQUIRED");
+    expect(f.inventory().tasks[0]?.recommendedAction).toBe(
+      "READ_ONLY_RECONCILIATION"
+    );
+    expect(view(f, () => "PRESENT").sandboxLeases[0]?.owner).toBe(
+      "PID_PRESENT_UNVERIFIED"
+    );
+    expect(readFileSync(leasePath, "utf8")).toBe(before);
+  });
+  it("stale challenge publication and invalid lease paths remain review-required", () => {
+    const f = fixture();
+    f.executed();
+    rmSync(f.path("checkpoints", `${f.checkpointStem}.report.json`));
+    mkdirSync(join(f.root, "challenges"), { recursive: true });
+    writeFileSync(f.path("challenges", "seed.tmp"), "orphan");
+    expect(view(f).classification).toBe("RECONCILIATION_REQUIRED");
+    const g = fixture();
+    g.executed();
+    rmSync(g.path("checkpoints", `${g.checkpointStem}.report.json`));
+    const prefix = `setra402-verify-${randomUUID()}`;
+    const container = `${prefix}-${randomUUID()}`;
+    g.save("sandbox-leases", `${container}.lease`, {
+      pid: 12345,
+      container,
+      directory: "C:\\untrusted\\path",
+    });
+    expect(view(g, () => "ABSENT").sandboxLeases[0]?.owner).toBe("CORRUPT");
+    expect(view(g, () => "ABSENT").classification).toBe(
+      "RECONCILIATION_REQUIRED"
     );
   });
 });
