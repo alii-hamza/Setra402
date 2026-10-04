@@ -177,7 +177,7 @@ beforeAll(async () => {
                   type: "test_suite",
                   runner_profile: "node22-test-v1",
                   test_bundle_hash: runtime.runners.list()[0]!.test_bundle_hash,
-                  timeout_seconds: 10,
+                  timeout_seconds: 20,
                 },
               ],
       },

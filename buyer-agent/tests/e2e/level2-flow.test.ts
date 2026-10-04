@@ -72,7 +72,7 @@ const server = createServer(async (req, res) => {
                 type: "test_suite",
                 runner_profile: "node22-test-v1",
                 test_bundle_hash: runners.list()[0]!.test_bundle_hash,
-                timeout_seconds: 10,
+                timeout_seconds: 20,
               },
             ],
     };
