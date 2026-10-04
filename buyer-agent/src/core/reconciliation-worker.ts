@@ -21,6 +21,7 @@ import {
   type ReconciliationFindingV1,
   type ReconciliationRecordV1,
 } from "./reconciliation-records.js";
+import type { ReconciliationLogV1 } from "./operator-telemetry.js";
 
 type Task = RecoveryInventoryV1["tasks"][number];
 export interface ReconciliationSources {
@@ -42,6 +43,7 @@ export interface ReconciliationWorkerOptions {
   now?: () => number;
   /** Test-only crash boundary. */
   fault?: (stage: string) => void;
+  observe?: (event: ReconciliationLogV1) => void;
 }
 export type WorkerRunResult =
   | { status: "COMPLETED" | "UNCHANGED"; record: ReconciliationRecordV1 }
@@ -49,7 +51,10 @@ export type WorkerRunResult =
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
-function revision(inventory: RecoveryInventoryV1, task: Task): string {
+export function recoveryInventoryRevision(
+  inventory: RecoveryInventoryV1,
+  task: Task
+): string {
   const digests = Object.values(task.evidence)
     .flat()
     .map((record) => {
@@ -129,7 +134,14 @@ export class ReconciliationWorker {
       try {
         return { ok: true, value: await action() };
       } catch (error) {
-        last = error instanceof Error ? error.name : "UnknownError";
+        last =
+          error instanceof TypeError
+            ? "TypeError"
+            : error instanceof RangeError
+            ? "RangeError"
+            : error instanceof Error
+            ? "Error"
+            : "UnknownError";
         if (attempt < this.maxReadAttempts)
           await sleep(this.backoffMs * attempt);
       }
@@ -155,7 +167,7 @@ export class ReconciliationWorker {
         throw new Error(
           "claimed task missing from inventory; no absence inference"
         );
-      const inventoryRevision = revision(inventory, task);
+      const inventoryRevision = recoveryInventoryRevision(inventory, task);
       this.point("after_inventory");
       const findings: ReconciliationFindingV1[] = [
         finding(
@@ -475,7 +487,11 @@ export class ReconciliationWorker {
         findings.some((item) => item.status === "CONFLICT")
       )
         classifications.add("RECONCILIATION_REQUIRED");
+      classifications.delete("SAFE_TO_REVERIFY");
       if (
+        immutableResultReady &&
+        !unresolved &&
+        !failedRead &&
         verification?.classification === "SAFE_TO_REVERIFY" &&
         !findings.some(
           (item) =>
@@ -559,6 +575,33 @@ export class ReconciliationWorker {
       });
       this.point("before_record_publish");
       this.records.publish(record);
+      for (const item of findings) {
+        const errorClass =
+          item.status === "UNAVAILABLE"
+            ? /\(([A-Za-z][A-Za-z0-9]{0,63})\)$/.exec(item.reason)?.[1] ??
+              "UnknownError"
+            : null;
+        try {
+          this.options.observe?.({
+            version: "1",
+            correlationId: record.correlationId,
+            taskKey,
+            classificationBefore: task.classifications,
+            classificationAfter: record.classifications,
+            evidenceSource: item.source,
+            operation:
+              item.source === "REVERIFICATION" ? "REVERIFY" : "RECONCILE",
+            result: item.status,
+            durationMs: Math.max(
+              0,
+              record.completedAtUnixMs - record.startedAtUnixMs
+            ),
+            errorClass,
+          });
+        } catch {
+          /* Logging cannot alter recovery evidence or claim release. */
+        }
+      }
       this.point("after_record_publish");
       return { status: "COMPLETED", record };
     } finally {

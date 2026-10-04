@@ -1,4 +1,4 @@
-import { readdirSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import { DurableJournal, ensureDurableDirectory } from "./journal.js";
@@ -107,9 +107,9 @@ export type ReconciliationFindingV1 = z.infer<
 export class ReconciliationRecords {
   private readonly journal = new DurableJournal();
   readonly root: string;
-  constructor(stateDirectory: string) {
+  constructor(stateDirectory: string, create = true) {
     this.root = resolve(stateDirectory, "reconciliation", "records");
-    ensureDurableDirectory(this.root);
+    if (create) ensureDurableDirectory(this.root);
   }
   private path(taskKey: string, attempt: number): string {
     hash.parse(taskKey);
@@ -119,6 +119,7 @@ export class ReconciliationRecords {
   }
   history(taskKey: string): ReconciliationRecordV1[] {
     hash.parse(taskKey);
+    if (!existsSync(this.root)) return [];
     const files = readdirSync(this.root).filter((name) =>
       name.startsWith(`${taskKey}.`)
     );

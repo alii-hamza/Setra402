@@ -9,6 +9,8 @@
     "build:runtime": "tsc -p tsconfig.runtime.json",
     "mcp:server": "npm run build:runtime && node dist/mcp/server.js",
     "mcp:stdio": "node dist/mcp/stdio.js",
+    "operator:inspect": "npm run build:runtime && node dist/core/operator-cli.js",
+    "test:operator": "vitest run tests/unit/operator-recovery.test.ts --no-file-parallelism",
     "web": "npm run build:runtime && node dist/web/start.js",
     "test:onboarding": "vitest run tests/unit/onboarding.test.ts tests/integration/onboarding-api.test.ts tests/e2e/onboarding-flow.test.ts",
     "test:web": "vitest run tests/web",

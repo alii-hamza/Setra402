@@ -326,6 +326,18 @@ describe("4A.6 durable reconciliation worker", () => {
     }).runTask(f.taskKey);
     expect(result.status).toBe("COMPLETED");
     expect(reverify).not.toHaveBeenCalled();
+    if (result.status === "COMPLETED")
+      expect(result.record.classifications).not.toContain("SAFE_TO_REVERIFY");
+  });
+
+  it("does not advertise safe reverification without an immutable result", async () => {
+    const f = fixture();
+    const result = await worker(f, {
+      verification: async () => f.verification("SAFE_TO_REVERIFY"),
+    }).runTask(f.taskKey);
+    expect(result.status).toBe("COMPLETED");
+    if (result.status === "COMPLETED")
+      expect(result.record.recommendedAction).not.toBe("SAFE_TO_REVERIFY");
   });
 
   it("fails closed on corrupt claims and unknown record versions", async () => {

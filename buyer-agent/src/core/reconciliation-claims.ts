@@ -5,8 +5,8 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  renameSync,
   rmdirSync,
+  unlinkSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { z } from "zod";
@@ -46,15 +46,15 @@ export type ProcessIdentityProbe = (pid: number) => string | null | undefined;
 /** The start identity is OS-observed, not inferred from PID or a wall-clock guess. */
 export const processStartIdentity: ProcessIdentityProbe = (pid) => {
   if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
-  try {
-    if (process.platform === "win32") {
+  if (process.platform === "win32") {
+    try {
       const output = execFileSync(
         "powershell.exe",
         [
           "-NoProfile",
           "-NonInteractive",
           "-Command",
-          `(Get-Process -Id ${pid} -ErrorAction SilentlyContinue).StartTime.ToUniversalTime().Ticks`,
+          `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($null -eq $p) { 'ABSENT' } else { $p.StartTime.ToUniversalTime().Ticks }`,
         ],
         {
           encoding: "utf8",
@@ -63,13 +63,23 @@ export const processStartIdentity: ProcessIdentityProbe = (pid) => {
           maxBuffer: 1_024,
         }
       ).trim();
-      return output || null;
+      return output === "ABSENT" ? null : output || undefined;
+    } catch {
+      return undefined;
     }
-    const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  }
+  let boot: string;
+  try {
+    boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  } catch {
+    return undefined;
+  }
+  if (!boot) return undefined;
+  try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
     const after = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
     const ticks = after[19]; // /proc field 22, after fields 1 and 2.
-    return boot && ticks ? `${boot}:${ticks}` : undefined;
+    return ticks ? `${boot}:${ticks}` : undefined;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     return undefined;
@@ -168,7 +178,11 @@ export class ReconciliationClaims {
       `${claim.taskKey}.${claim.claimId}.${suffix}.json`
     );
     if (existsSync(target)) throw new Error("claim history collision");
-    renameSync(this.claimPath(claim.taskKey), target);
+    // Journal checksums bind the basename. Publish a new envelope before
+    // removing the active claim; a crash between steps fails closed.
+    if (!this.journal.publish(target, claim))
+      throw new Error("claim history collision");
+    unlinkSync(this.claimPath(claim.taskKey));
     syncDirectory(join(this.root, "claims"));
     syncDirectory(join(this.root, "claim-history"));
   }
