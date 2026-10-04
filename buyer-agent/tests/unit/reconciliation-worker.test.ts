@@ -13,6 +13,8 @@ import {
 import { createReconciliationSources } from "../../src/core/reconciliation-sources.js";
 import { scanRecoveryInventory } from "../../src/core/recovery-inventory.js";
 import { inspectVerificationRecovery } from "../../src/verification/recovery.js";
+import { VerificationCoordinator } from "../../src/verification/coordinator.js";
+import { VerificationEngine } from "../../src/verification/engine.js";
 import type {
   FinancialReconciliationResult,
   FinancialRecoveryRequest,
@@ -542,6 +544,59 @@ describe("4A.6 durable reconciliation worker", () => {
       run.status === "COMPLETED" &&
         run.record.findings.some((item) => item.source === "REVERIFICATION")
     ).toBe(true);
+  });
+
+  it("uses the concrete source adapter, VerificationEngine, and immutable checkpoint to save a linked report", async () => {
+    const f = fixture();
+    const saved = persistedResult(f);
+    const coordinator = new VerificationCoordinator(
+      new VerificationEngine(),
+      {
+        verifier: new PublicKey(f.quote.verifier),
+        getChainUnixTime: async () => 60,
+        verifyManifestMemo: async () => {},
+      },
+      new Map(),
+      { getTransaction: async () => null, getAccount: async () => null }
+    );
+    const sources = createReconciliationSources({
+      stateDirectory: f.root,
+      sellerUrl: f.inventory.sellerUrl,
+      programId: new PublicKey(f.quote.program_id),
+      expectedMint: new PublicKey(f.quote.mint),
+      verifier: new PublicKey(f.quote.verifier),
+      chain: {
+        reconcileFinancial: async () => financialResult("PROVEN_OCCURRED"),
+      },
+      verificationCoordinator: coordinator,
+    });
+    sources.provider = async () =>
+      ({
+        status: "RESULT_PERSISTED_UNVERIFIED",
+        evidence: {
+          record_state: "RESULT_PERSISTED",
+          input_hash: hashCanonical(saved.input),
+          result_hash: saved.resultHash,
+        },
+      } as ProviderEvidenceAssessment);
+    const run = await worker(f, sources).runTask(f.taskKey);
+    expect(run.status).toBe("COMPLETED");
+    const checkpointStem = hashCanonical({
+      buyer: f.buyer,
+      taskId: f.quote.task_id,
+    });
+    const report = f.journal.read(
+      join(f.root, "checkpoints", `${checkpointStem}.report.json`)
+    ) as { passed: boolean; resultHash: string };
+    expect(report.passed).toBe(true);
+    expect(report.resultHash).toBe(saved.resultHash);
+    if (run.status === "COMPLETED")
+      expect(
+        run.record.findings.some(
+          (finding) =>
+            finding.source === "REVERIFICATION" && finding.status === "OBSERVED"
+        )
+      ).toBe(true);
   });
 
   it("blocks reverification when an unattributed sandbox lease remains", async () => {
