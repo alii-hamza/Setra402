@@ -9,7 +9,7 @@ use crate::config::{AppState, PaymentQuote, TaskRequest, TaskResult, PROTOCOL_FE
 use crate::execute::hash_canonical;
 use crate::mint_store::{self, IssuanceIntent, IssuanceReceipt};
 use crate::pda::{task_state_pda, vault_pda};
-use crate::registry::{load_services, policy_hash, profile_recovery_capability, ServiceDefinition};
+use crate::registry::{load_services, policy_hash, profile_definition, ServiceDefinition};
 use crate::task_state::{try_from_account_data, TaskStatus};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -401,12 +401,15 @@ pub async fn get_execution_evidence(
         "input_hash": null,
         "result_hash": null,
         "provider_connector_ref": null,
-        "recovery_capability": "NONE",
+        "connector_type": null,
+        "recovery_capabilities": null,
         "profile_binding": "CURRENT_REGISTRY_ONLY",
         "idempotency_key": null,
         "provider_execution_id": null,
-        "status_query_supported": false,
-        "durable_receipt_supported": false
+        "provider_status": null,
+        "receipt_hash": null,
+        "response_commitment": null,
+        "observed_at_unix": null
     });
     let Some(directory) = &state.execution_store else {
         return Ok(Json(response));
@@ -438,8 +441,19 @@ pub async fn get_execution_evidence(
     .into_iter()
     .find(|service| service.id == intent.service_id)
     .ok_or(StatusCode::CONFLICT)?;
-    let capability =
-        profile_recovery_capability(&service.provider_connector_ref).ok_or(StatusCode::CONFLICT)?;
+    let profile =
+        profile_definition(&service.provider_connector_ref).ok_or(StatusCode::CONFLICT)?;
+    if !profile.active || !profile.capabilities.contains(&service.capability) {
+        return Err(StatusCode::CONFLICT);
+    }
+    let idempotency_key = hash_canonical(&json!({
+        "version":"1",
+        "task_state_pda":pda.to_string(),
+        "service_id":intent.service_id,
+        "input_hash":intent.input_hash,
+        "provider_id":service.provider_connector_ref
+    }))
+    .map_err(|_| StatusCode::CONFLICT)?;
     response["record_state"] = json!(if result.is_some() {
         "RESULT_PERSISTED"
     } else {
@@ -452,7 +466,16 @@ pub async fn get_execution_evidence(
         .map(|saved| json!(saved.result_hash))
         .unwrap_or(Value::Null);
     response["provider_connector_ref"] = json!(service.provider_connector_ref);
-    response["recovery_capability"] = json!(capability);
+    response["connector_type"] = json!(profile.connector_type);
+    response["recovery_capabilities"] = json!(profile.recovery_capabilities);
+    response["idempotency_key"] = json!(idempotency_key);
+    if let Some(saved) = result {
+        if profile.recovery_capabilities.durable_receipt {
+            response["receipt_hash"] = json!(saved.result_hash);
+        }
+        response["response_commitment"] = json!(saved.result_hash);
+        response["observed_at_unix"] = json!(saved.completed_at_unix);
+    }
     Ok(Json(response))
 }
 

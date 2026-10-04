@@ -83,6 +83,7 @@ describe("server authoritative onboarding registry", () => {
       (
         await setup().registry.register({
           ...valid,
+          capability: "web.scrape.leads",
           provider_connector_ref: "fixture-source",
           verification_policy: policy,
         })
@@ -205,10 +206,13 @@ describe("server authoritative onboarding registry", () => {
     ]);
     expect(s.registry.list()).toHaveLength(4);
   });
-  it("profiles are server-only fixture configuration with no secrets", () => {
+  it("profiles expose only opaque secret references and no execution commands", () => {
     expect(PROVIDER_PROFILES).toHaveLength(4);
     expect(JSON.stringify(PROVIDER_PROFILES)).not.toMatch(
-      /secret|command|host_path/
+      /secret_value|api_key|token|command|host_path|stdio|executable/
     );
+    expect(
+      PROVIDER_PROFILES.every((profile) => profile.secret_refs.length === 0)
+    ).toBe(true);
   });
 });

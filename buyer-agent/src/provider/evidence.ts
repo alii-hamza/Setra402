@@ -3,6 +3,10 @@ import { PublicKey } from "@solana/web3.js";
 import { hashCanonical } from "../manifest/hash.js";
 import { deriveTaskPda } from "../chain/pda.js";
 import { PROVIDER_PROFILES } from "../registry/services.js";
+import {
+  providerExecutionIdentity,
+  providerRecoveryCapabilitiesV1Schema,
+} from "../registry/providers.js";
 
 const hash = z.string().regex(/^[0-9a-f]{64}$/);
 const pubkey = z.string().refine((value) => {
@@ -29,12 +33,17 @@ export const providerEvidenceV1Schema = z
     input_hash: hash.nullable(),
     result_hash: hash.nullable(),
     provider_connector_ref: z.string().min(1).nullable(),
-    recovery_capability: z.enum(["NONE", "DURABLE_RESULT_REPLAY_ONLY"]),
+    connector_type: z
+      .enum(["LOCAL_FIXTURE", "REST_API", "MCP_TOOL"])
+      .nullable(),
+    recovery_capabilities: providerRecoveryCapabilitiesV1Schema.nullable(),
     profile_binding: z.literal("CURRENT_REGISTRY_ONLY"),
-    idempotency_key: z.null(),
-    provider_execution_id: z.null(),
-    status_query_supported: z.literal(false),
-    durable_receipt_supported: z.literal(false),
+    idempotency_key: hash.nullable(),
+    provider_execution_id: z.string().min(1).max(256).nullable(),
+    provider_status: z.string().min(1).max(64).nullable(),
+    receipt_hash: hash.nullable(),
+    response_commitment: hash.nullable(),
+    observed_at_unix: z.number().int().nonnegative().nullable(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -45,6 +54,9 @@ export const providerEvidenceV1Schema = z
       value.service_id,
       value.input_hash,
       value.provider_connector_ref,
+      value.connector_type,
+      value.recovery_capabilities,
+      value.idempotency_key,
     ];
     if (
       hasIntent
@@ -63,15 +75,43 @@ export const providerEvidenceV1Schema = z
         code: z.ZodIssueCode.custom,
         message: "result hash does not match record state",
       });
-    if (hasIntent && value.recovery_capability !== "DURABLE_RESULT_REPLAY_ONLY")
+    if (
+      !hasIntent &&
+      [
+        value.provider_execution_id,
+        value.provider_status,
+        value.receipt_hash,
+        value.response_commitment,
+        value.observed_at_unix,
+      ].some((field) => field !== null)
+    )
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "fixture evidence lacks declared profile capability",
+        message: "absent evidence cannot claim provider observations",
       });
-    if (!hasIntent && value.recovery_capability !== "NONE")
+    if (
+      value.provider_execution_id !== null &&
+      !value.recovery_capabilities?.execution_id
+    )
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "absent evidence cannot claim capability",
+        message: "provider execution ID is not declared",
+      });
+    if (
+      value.provider_status !== null &&
+      !value.recovery_capabilities?.status_query
+    )
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "provider status is not declared",
+      });
+    if (
+      value.receipt_hash !== null &&
+      !value.recovery_capabilities?.durable_receipt
+    )
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "provider receipt is not declared",
       });
   });
 export type ProviderEvidenceV1 = z.infer<typeof providerEvidenceV1Schema>;
@@ -121,19 +161,33 @@ export function assessProviderEvidence(
     evidence.record_state === "INTENT_ONLY" ||
     evidence.record_state === "RESULT_PERSISTED"
   ) {
-    if (
-      evidence.service_id !== expected.serviceId ||
-      evidence.input_hash !== expectedInputHash
-    )
+    const serviceId = evidence.service_id;
+    const inputHash = evidence.input_hash;
+    const providerId = evidence.provider_connector_ref;
+    if (!serviceId || !inputHash || !providerId)
+      throw new Error("provider evidence identity fields are missing");
+    if (serviceId !== expected.serviceId || inputHash !== expectedInputHash)
       throw new Error("provider evidence service/input binding conflict");
     if (
       !PROVIDER_PROFILES.some(
         (profile) =>
-          profile.id === evidence.provider_connector_ref &&
-          profile.recovery_capability === evidence.recovery_capability
+          profile.provider_id === providerId &&
+          profile.connector_type === evidence.connector_type &&
+          hashCanonical(profile.recovery_capabilities) ===
+            hashCanonical(evidence.recovery_capabilities)
       )
     )
       throw new Error("provider evidence profile is not allowlisted");
+    if (
+      evidence.idempotency_key !==
+      providerExecutionIdentity({
+        taskStatePda: evidence.task_state_pda,
+        serviceId,
+        inputHash,
+        providerId,
+      })
+    )
+      throw new Error("provider evidence idempotency binding conflict");
   }
   return evidence.record_state === "RESULT_PERSISTED"
     ? { status: "RESULT_PERSISTED_UNVERIFIED", evidence }

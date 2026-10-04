@@ -4,6 +4,7 @@ pub mod execution_store;
 pub mod handlers;
 pub mod mint_store;
 pub mod pda;
+pub mod provider;
 pub mod registry;
 pub mod rpc;
 pub mod task_state;

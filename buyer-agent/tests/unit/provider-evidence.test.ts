@@ -6,6 +6,7 @@ import {
   assessProviderEvidence,
   queryProviderEvidence,
 } from "../../src/provider/evidence.js";
+import { providerExecutionIdentity } from "../../src/registry/providers.js";
 
 const buyer = Keypair.generate().publicKey,
   program = Keypair.generate().publicKey;
@@ -28,6 +29,8 @@ function evidence(
 ) {
   const hasIntent =
     recordState === "INTENT_ONLY" || recordState === "RESULT_PERSISTED";
+  const inputHash = hashCanonical(input);
+  const resultHash = hashCanonical({ done: true });
   return {
     version: "1",
     buyer: expected.buyer,
@@ -35,16 +38,34 @@ function evidence(
     task_state_pda: expected.taskStatePda,
     record_state: recordState,
     service_id: hasIntent ? expected.serviceId : null,
-    input_hash: hasIntent ? hashCanonical(input) : null,
-    result_hash:
-      recordState === "RESULT_PERSISTED" ? hashCanonical({ done: true }) : null,
+    input_hash: hasIntent ? inputHash : null,
+    result_hash: recordState === "RESULT_PERSISTED" ? resultHash : null,
     provider_connector_ref: hasIntent ? "fixture-echo" : null,
-    recovery_capability: hasIntent ? "DURABLE_RESULT_REPLAY_ONLY" : "NONE",
+    connector_type: hasIntent ? "LOCAL_FIXTURE" : null,
+    recovery_capabilities: hasIntent
+      ? {
+          idempotency: "KEYED",
+          execution_id: false,
+          status_query: false,
+          durable_receipt: true,
+          deterministic_replay: true,
+          may_produce_non_idempotent_external_effect: false,
+        }
+      : null,
     profile_binding: "CURRENT_REGISTRY_ONLY",
-    idempotency_key: null,
+    idempotency_key: hasIntent
+      ? providerExecutionIdentity({
+          taskStatePda: expected.taskStatePda,
+          serviceId: expected.serviceId,
+          inputHash,
+          providerId: "fixture-echo",
+        })
+      : null,
     provider_execution_id: null,
-    status_query_supported: false,
-    durable_receipt_supported: false,
+    provider_status: null,
+    receipt_hash: recordState === "RESULT_PERSISTED" ? resultHash : null,
+    response_commitment: recordState === "RESULT_PERSISTED" ? resultHash : null,
+    observed_at_unix: recordState === "RESULT_PERSISTED" ? 1 : null,
   };
 }
 describe("Phase 4A.3 provider evidence contract", () => {
@@ -90,7 +111,7 @@ describe("Phase 4A.3 provider evidence contract", () => {
     ).toThrow();
     expect(() =>
       assessProviderEvidence(
-        { ...evidence("INTENT_ONLY"), status_query_supported: true },
+        { ...evidence("INTENT_ONLY"), provider_status: "RUNNING" },
         expected
       )
     ).toThrow();

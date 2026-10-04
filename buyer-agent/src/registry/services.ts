@@ -19,32 +19,23 @@ import {
   syncDirectory,
   type JournalFault,
 } from "../core/journal.js";
+import {
+  parseProviderDefinitions,
+  type ProviderDefinitionV1,
+} from "./providers.js";
 
-const profilesSchema = z.array(
-  z
-    .object({
-      id: z.string(),
-      name: z.string(),
-      provider_type: z.literal("LOCAL_FIXTURE"),
-      privacy_support: z.boolean(),
-      recovery_capability: z.literal("DURABLE_RESULT_REPLAY_ONLY"),
-    })
-    .strict()
-);
 export const PROVIDER_PROFILES = Object.freeze(
-  profilesSchema
-    .parse(
-      JSON.parse(
-        readFileSync(
-          new URL(
-            "../../../seller-server/config/provider-profiles.json",
-            import.meta.url
-          ),
-          "utf8"
-        )
+  parseProviderDefinitions(
+    JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../seller-server/config/provider-profiles.json",
+          import.meta.url
+        ),
+        "utf8"
       )
     )
-    .map((p) => Object.freeze(p))
+  ).map((p) => Object.freeze(p))
 );
 const definition = z
   .object({
@@ -75,7 +66,10 @@ const definition = z
     verification_policy: z.unknown(),
   })
   .strict();
-export function normalizeService(value: unknown) {
+export function normalizeService(
+  value: unknown,
+  providerProfiles: readonly ProviderDefinitionV1[] = PROVIDER_PROFILES
+) {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("invalid service definition");
   // Ignore the display-only hash/type supplied by a browser or disk. The
@@ -87,10 +81,13 @@ export function normalizeService(value: unknown) {
   } = value as Record<string, unknown>;
   const service = definition.parse(input),
     policy = parseVerificationPolicy(service.verification_policy);
-  const profile = PROVIDER_PROFILES.find(
-    (p) => p.id === service.provider_connector_ref
+  const profile = providerProfiles.find(
+    (p) => p.provider_id === service.provider_connector_ref
   );
   if (!profile) throw new Error("unknown execution profile");
+  if (!profile.active) throw new Error("inactive execution profile");
+  if (!profile.capabilities.includes(service.capability))
+    throw new Error("provider does not declare service capability");
   if (service.privacy_support && !profile.privacy_support)
     throw new Error("incompatible privacy configuration");
   const runners = defaultRunners();
@@ -109,7 +106,7 @@ export function normalizeService(value: unknown) {
     ...service,
     verification_policy: policy,
     policy_hash: hashCanonical(policy),
-    provider_type: profile.provider_type,
+    provider_type: profile.connector_type,
   };
 }
 export type ServiceDefinition = ReturnType<typeof normalizeService>;
@@ -118,7 +115,8 @@ export class ServiceRegistry {
     private readonly baseline: string | URL,
     readonly overlay: string,
     readonly writeEnabled = false,
-    private readonly fault?: JournalFault
+    private readonly fault?: JournalFault,
+    private readonly providerProfiles: readonly ProviderDefinitionV1[] = PROVIDER_PROFILES
   ) {
     if (fault && process.env.NODE_ENV !== "test")
       throw new Error("registry failpoints are test-only");
@@ -129,14 +127,17 @@ export class ServiceRegistry {
       unknown
     >[];
     return values.map((v) =>
-      normalizeService({
-        description: String(v.name),
-        exposure: "both",
-        privacy_support: true,
-        provider_connector_ref:
-          v.id === "lead-scraper-demo" ? "fixture-lead" : "fixture-echo",
-        ...v,
-      })
+      normalizeService(
+        {
+          description: String(v.name),
+          exposure: "both",
+          privacy_support: true,
+          provider_connector_ref:
+            v.id === "lead-scraper-demo" ? "fixture-lead" : "fixture-echo",
+          ...v,
+        },
+        this.providerProfiles
+      )
     );
   }
   private local(): ServiceDefinition[] {
@@ -152,7 +153,9 @@ export class ServiceRegistry {
       const raw = JSON.parse(bytes.toString("utf8"));
       if (!Array.isArray(raw) || raw.length > 500)
         throw new Error("invalid overlay");
-      const services = raw.map(normalizeService),
+      const services = raw.map((value) =>
+          normalizeService(value, this.providerProfiles)
+        ),
         ids = new Set(this.baselineServices().map((v) => v.id));
       for (const service of services) {
         if (ids.has(service.id)) throw new Error("duplicate ID");
@@ -173,7 +176,7 @@ export class ServiceRegistry {
   }
   async register(value: unknown): Promise<ServiceDefinition> {
     if (!this.writeEnabled) throw new Error("onboarding writes disabled");
-    const service = normalizeService(value);
+    const service = normalizeService(value, this.providerProfiles);
     ensureDurableDirectory(dirname(this.overlay));
     const lock = `${this.overlay}.lock`;
     let descriptor: number | undefined;

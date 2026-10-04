@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::sync::OnceLock;
 
 use crate::execute::hash_canonical;
+use crate::provider::{provider_definitions, ProviderDefinitionV1};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -54,6 +55,11 @@ pub fn load_services(
             "fixture-echo"
         }
         .into();
+        service.provider_type = profile_definition(&service.provider_connector_ref)
+            .expect("baseline provider profile")
+            .connector_type
+            .as_str()
+            .into();
         service.policy_hash = policy_hash(service);
     }
     let Some(path) = overlay else {
@@ -71,9 +77,6 @@ pub fn load_services(
     if local.len() > 500 {
         return baseline;
     }
-    let profiles: Vec<Value> =
-        serde_json::from_str(include_str!("../config/provider-profiles.json"))
-            .expect("checked-in profiles");
     let mut ids: std::collections::HashSet<String> =
         baseline.iter().map(|s| s.id.clone()).collect();
     for service in &mut local {
@@ -93,9 +96,11 @@ pub fn load_services(
             || price == 0
             || !(5..=3600).contains(&service.timeout_seconds)
             || !["rest", "mcp", "both"].contains(&service.exposure.as_str())
-            || !profiles
-                .iter()
-                .any(|p| p["id"] == service.provider_connector_ref)
+            || !profile_definition(&service.provider_connector_ref).is_some_and(|profile| {
+                profile.active
+                    && profile.capabilities.contains(&service.capability)
+                    && (!service.privacy_support || profile.privacy_support)
+            })
             || !matches!(service.verification_policy["level"].as_u64(), Some(1 | 2))
             || policy.as_ref().ok() != Some(&service.policy_hash)
         {
@@ -109,16 +114,10 @@ pub fn load_services(
 
 static SERVICES: OnceLock<Vec<ServiceDefinition>> = OnceLock::new();
 
-pub fn profile_recovery_capability(profile_id: &str) -> Option<&'static str> {
-    static PROFILES: OnceLock<Vec<Value>> = OnceLock::new();
-    PROFILES
-        .get_or_init(|| {
-            serde_json::from_str(include_str!("../config/provider-profiles.json"))
-                .expect("checked-in provider profiles")
-        })
+pub fn profile_definition(profile_id: &str) -> Option<&'static ProviderDefinitionV1> {
+    provider_definitions()
         .iter()
-        .find(|profile| profile["id"] == profile_id)
-        .and_then(|profile| profile["recovery_capability"].as_str())
+        .find(|profile| profile.provider_id == profile_id)
 }
 
 pub fn services() -> &'static [ServiceDefinition] {

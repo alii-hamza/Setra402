@@ -58,22 +58,23 @@ async fn provider_evidence_reports_durable_result_without_fabricating_external_i
     let dir =
         std::env::temp_dir().join(format!("setra-provider-evidence-{}", Pubkey::new_unique()));
     state.execution_store = Some(dir.clone());
-    assert_eq!(
-        retry_post(state.clone(), buyer, json!({"x":1}), "legacy-rest")
-            .await
-            .status(),
-        StatusCode::OK
-    );
+    let execution = retry_post(state.clone(), buyer, json!({"x":1}), "legacy-rest").await;
+    let status = execution.status();
+    let execution_body = body_json(execution).await;
+    assert_eq!(status, StatusCode::OK, "{execution_body}");
     state.results.lock().unwrap().clear();
     let response = evidence_get(state, buyer).await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_json(response).await;
     assert_eq!(body["record_state"], "RESULT_PERSISTED");
-    assert_eq!(body["recovery_capability"], "DURABLE_RESULT_REPLAY_ONLY");
-    assert_eq!(body["idempotency_key"], Value::Null);
+    assert_eq!(body["connector_type"], "LOCAL_FIXTURE");
+    assert_eq!(body["recovery_capabilities"]["idempotency"], "KEYED");
+    assert_eq!(body["recovery_capabilities"]["durable_receipt"], true);
+    assert_eq!(body["idempotency_key"].as_str().unwrap().len(), 64);
     assert_eq!(body["provider_execution_id"], Value::Null);
-    assert_eq!(body["status_query_supported"], false);
-    assert_eq!(body["durable_receipt_supported"], false);
+    assert_eq!(body["provider_status"], Value::Null);
+    assert_eq!(body["receipt_hash"], body["result_hash"]);
+    assert_eq!(body["response_commitment"], body["result_hash"]);
     assert_eq!(
         body["input_hash"],
         seller_server::execute::hash_canonical(&json!({"x":1})).unwrap()
@@ -122,12 +123,10 @@ async fn provider_evidence_rejects_orphan_result_and_conflicting_immutable_input
     let dir =
         std::env::temp_dir().join(format!("setra-provider-conflict-{}", Pubkey::new_unique()));
     state.execution_store = Some(dir.clone());
-    assert_eq!(
-        retry_post(state.clone(), buyer, json!({"x":1}), "legacy-rest")
-            .await
-            .status(),
-        StatusCode::OK
-    );
+    let execution = retry_post(state.clone(), buyer, json!({"x":1}), "legacy-rest").await;
+    let status = execution.status();
+    let execution_body = body_json(execution).await;
+    assert_eq!(status, StatusCode::OK, "{execution_body}");
     let (pda, _) = seller_server::pda::task_state_pda(&state.program_id, &buyer, 7);
     let intent_path = dir.join(format!("{pda}.intent"));
     let original = std::fs::read(&intent_path).unwrap();

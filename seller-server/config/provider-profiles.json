@@ -1,30 +1,78 @@
 [
   {
-    "id": "fixture-echo",
-    "name": "Canonical object echo",
-    "provider_type": "LOCAL_FIXTURE",
+    "version": "1",
+    "provider_id": "fixture-echo",
+    "display_name": "Canonical object echo",
+    "connector_type": "LOCAL_FIXTURE",
+    "execution_profile": "fixture-echo",
+    "capabilities": ["setra402.task.echo"],
     "privacy_support": true,
-    "recovery_capability": "DURABLE_RESULT_REPLAY_ONLY"
+    "active": true,
+    "recovery_capabilities": {
+      "idempotency": "KEYED",
+      "execution_id": false,
+      "status_query": false,
+      "durable_receipt": true,
+      "deterministic_replay": true,
+      "may_produce_non_idempotent_external_effect": false
+    },
+    "secret_refs": []
   },
   {
-    "id": "fixture-lead",
-    "name": "Deterministic lead records",
-    "provider_type": "LOCAL_FIXTURE",
+    "version": "1",
+    "provider_id": "fixture-lead",
+    "display_name": "Deterministic lead records",
+    "connector_type": "LOCAL_FIXTURE",
+    "execution_profile": "fixture-lead",
+    "capabilities": ["web.scrape.leads"],
     "privacy_support": true,
-    "recovery_capability": "DURABLE_RESULT_REPLAY_ONLY"
+    "active": true,
+    "recovery_capabilities": {
+      "idempotency": "KEYED",
+      "execution_id": false,
+      "status_query": false,
+      "durable_receipt": true,
+      "deterministic_replay": true,
+      "may_produce_non_idempotent_external_effect": false
+    },
+    "secret_refs": []
   },
   {
-    "id": "fixture-source",
-    "name": "Independent source fixture",
-    "provider_type": "LOCAL_FIXTURE",
+    "version": "1",
+    "provider_id": "fixture-source",
+    "display_name": "Independent source fixture",
+    "connector_type": "LOCAL_FIXTURE",
+    "execution_profile": "fixture-source",
+    "capabilities": ["web.scrape.leads"],
     "privacy_support": true,
-    "recovery_capability": "DURABLE_RESULT_REPLAY_ONLY"
+    "active": true,
+    "recovery_capabilities": {
+      "idempotency": "KEYED",
+      "execution_id": false,
+      "status_query": false,
+      "durable_receipt": true,
+      "deterministic_replay": true,
+      "may_produce_non_idempotent_external_effect": false
+    },
+    "secret_refs": []
   },
   {
-    "id": "fixture-code",
-    "name": "Pure JavaScript module fixture",
-    "provider_type": "LOCAL_FIXTURE",
+    "version": "1",
+    "provider_id": "fixture-code",
+    "display_name": "Pure JavaScript module fixture",
+    "connector_type": "LOCAL_FIXTURE",
+    "execution_profile": "fixture-code",
+    "capabilities": ["setra402.task.echo"],
     "privacy_support": true,
-    "recovery_capability": "DURABLE_RESULT_REPLAY_ONLY"
+    "active": true,
+    "recovery_capabilities": {
+      "idempotency": "KEYED",
+      "execution_id": false,
+      "status_query": false,
+      "durable_receipt": true,
+      "deterministic_replay": true,
+      "may_produce_non_idempotent_external_effect": false
+    },
+    "secret_refs": []
   }
 ]
