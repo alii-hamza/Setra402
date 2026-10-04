@@ -2,7 +2,7 @@
 
 ## Status and commits
 
-**Implementation complete; final regression certification pending WSL recovery.** Do not treat this document as acceptance of the Batch 2 final exit gate.
+**Implementation and final regression certification complete.** The final-tree gate passed on 2026-10-04 after restoring the local WSL test environment and correcting two E2E fixture time allowances.
 
 - Branch: `agent-validator`
 - Starting accepted commit: `9276e8f` (606 unique passing tests)
@@ -11,6 +11,7 @@
 - Windows process-probe hardening: `eb2bbb6`
 - Concrete immutable-result reverification test: `0197067`
 - Ending implementation commit: `0197067`
+- Final-gate fixture correction: `f8a7809`
 - This audit is a separate documentation commit; its hash is reported with the final handoff.
 
 ## IMPLEMENTED — 4A.6
@@ -55,7 +56,9 @@ At implementation commit `eb2bbb6`, `npm run test:all` passed with **646 unique,
 
 Build, runtime build, format check, browser secret scan, and `git diff --check` also passed in that gate. The additional concrete reverification test at `0197067` raises the final-tree buyer unit count to **387**; it passed in the focused run and in the final-tree `test:all` unit stage. Final-tree integration passed **115**. Final-tree browser/web **14**, seller Rust **70**, build, runtime build, format check, and diff check passed separately.
 
-The final-tree `npm run test:all` **did not complete successfully**: the WSL Solana validator disappeared before the live E2E stage, causing RPC connection refusals and cascading seller transport failures. WSL then reported `Wsl/Service/E_UNEXPECTED` and could not start Ubuntu after `wsl --shutdown`. The current account could not restart `WslService` (`Cannot open 'WslService' service`). Docker sandbox and Anchor could not be rerun on the final tree. **Do not report 647 as a fully passing final regression total.** The last fully green, non-overlapping total is 646 at `eb2bbb6`; the final-tree full gate remains pending an external WSL service repair/restart and rerun.
+The final-tree `npm run test:all` exited **0** at `f8a7809` with **647 unique tests passed, 0 failed**. The disjoint totals were buyer unit **387**, buyer integration **115**, live E2E **41**, Docker sandbox **15**, browser/web **14**, seller Rust **70** (30 + 40), and Anchor **5**. Build, runtime build, format check, the browser bundle secret-scan assertion in `test:web`, and `git diff --check` passed in the same gate. Focused onboarding **13/13** and Level-2 live fixture **4/4** also passed; those tests overlap live E2E and are not added to 647.
+
+The prior WSL interruption left a truncated snapshot in the task-owned disposable Solana ledger. C: had approximately 7.9 GiB free at the start of the retry; Ubuntu, Redis, and the WSL-root Docker command became available. The damaged ledger was removed only after verifying its exact path, ownership, and test genesis file. A fresh validator, fixture accounts, and task-owned seller server were started. Two unsuccessful full attempts then exposed intermittent 10-second sandbox wall-clock timeouts in the deterministic code fixtures; saved `VerificationReport` records identified the failed check. One subsequent attempt reused an accumulated test ledger and had broad live RPC/test timeouts. After another verified disposable-ledger reset, a full gate passed. No application, financial, provider, or verification implementation was changed. The two fixture policies alone now allow 20 seconds for the sandbox; expected PASS/FAIL assertions and production limits remain unchanged.
 
 ## Bugs found and fixed
 
@@ -63,6 +66,7 @@ The final-tree `npm run test:all` **did not complete successfully**: the WSL Sol
 2. The worker initially could advertise `SAFE_TO_REVERIFY` even when it correctly refused to execute without an immutable result. Recommendation and execution now share the strict readiness gate.
 3. A two-second Windows PowerShell process-start probe was unavailable under a parallel unit gate. The probe has a bounded ten-second limit; any failure disables claim ownership/reclaim rather than using PID alone. The test accepts explicit unavailability as a fail-closed result.
 4. Provider evidence can use the manifest's committed input hash when a raw buyer input response was lost, while rejecting a mismatch if both are present.
+5. The final-gate retry found a truncated disposable Solana snapshot after the host disk filled and 10-second WSL Docker startup variability in two live fixtures. The validator fixture was regenerated, and only those two test-policy time allowances were changed to 20 seconds; focused and complete gates passed.
 
 ## Remaining unknown states and 4A.7 prerequisites
 
@@ -79,7 +83,7 @@ The final-tree `npm run test:all` **did not complete successfully**: the WSL Sol
 - [x] Worker has no provider, financial, voucher, or refund mutation path.
 - [x] Operator projection, provenance, bounded listings, logs, metrics, backup validation, and resource health exist.
 - [x] Focused tests pass; accepted baseline behavior passed a complete 646-test gate before the final test-only commit.
-- [ ] Final-tree `npm run test:all` passes after WSL service recovery.
+- [x] Final-tree `npm run test:all` passes with 647 unique tests and all quality gates after WSL service recovery.
 - [x] 4A.7 and Phase 4B/4C/4D were not implemented.
 
-**Batch 2 is not marked complete until the final-tree full gate is rerun successfully.**
+**Batch 2 final exit gate is closed.**
