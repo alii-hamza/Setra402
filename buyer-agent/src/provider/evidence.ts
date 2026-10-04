@@ -81,7 +81,9 @@ export interface ProviderEvidenceExpectation {
   taskId: string;
   taskStatePda: string;
   serviceId: string;
-  input: unknown;
+  input?: unknown;
+  /** Use the committed manifest hash when raw input was lost with the response. */
+  inputHash?: string;
 }
 export type ProviderEvidenceAssessment =
   | { status: "UNKNOWN_EXTERNAL_EFFECT"; evidence: ProviderEvidenceV1 }
@@ -93,6 +95,16 @@ export function assessProviderEvidence(
   expected: ProviderEvidenceExpectation
 ): ProviderEvidenceAssessment {
   const evidence = providerEvidenceV1Schema.parse(raw);
+  const expectedInputHash =
+    expected.inputHash ??
+    (expected.input === undefined ? null : hashCanonical(expected.input));
+  if (
+    !expectedInputHash ||
+    !hash.safeParse(expectedInputHash).success ||
+    (expected.input !== undefined &&
+      hashCanonical(expected.input) !== expectedInputHash)
+  )
+    throw new Error("provider evidence expected input commitment is invalid");
   const [derived] = deriveTaskPda(
     new PublicKey(expected.programId),
     new PublicKey(expected.buyer),
@@ -111,7 +123,7 @@ export function assessProviderEvidence(
   ) {
     if (
       evidence.service_id !== expected.serviceId ||
-      evidence.input_hash !== hashCanonical(expected.input)
+      evidence.input_hash !== expectedInputHash
     )
       throw new Error("provider evidence service/input binding conflict");
     if (
