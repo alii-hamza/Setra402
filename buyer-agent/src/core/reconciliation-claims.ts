@@ -59,7 +59,7 @@ export const processStartIdentity: ProcessIdentityProbe = (pid) => {
         {
           encoding: "utf8",
           windowsHide: true,
-          timeout: 2_000,
+          timeout: 10_000,
           maxBuffer: 1_024,
         }
       ).trim();

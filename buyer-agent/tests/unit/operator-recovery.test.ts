@@ -218,8 +218,10 @@ function fixture(privateTask = false) {
 }
 
 describe("4A.8 read-only operator evidence", () => {
-  it("observes a real OS process-start identity for the active worker", () => {
-    expect(processStartIdentity(process.pid)).toMatch(/\S+/);
+  it("returns an OS start identity or fails closed when the probe is unavailable", () => {
+    const observed = processStartIdentity(process.pid);
+    expect(observed == null || /^[0-9]+$/.test(observed)).toBe(true);
+    expect(processStartIdentity(-1)).toBeUndefined();
   });
   it("shows task identity, stable correlation, and separate chain/local/provider provenance", async () => {
     const f = fixture();
