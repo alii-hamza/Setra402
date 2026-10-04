@@ -10,6 +10,8 @@
     "mcp:server": "npm run build:runtime && node dist/mcp/server.js",
     "mcp:stdio": "node dist/mcp/stdio.js",
     "operator:inspect": "npm run build:runtime && node dist/core/operator-cli.js",
+    "refund:schedule": "npm run build:runtime && node dist/core/refund-scheduler-cli.js",
+    "test:refund": "npm run build:runtime && vitest run tests/unit/refund-scheduler.test.ts tests/unit/refund-journal-retry.test.ts tests/e2e/refund-scheduler-live.test.ts --no-file-parallelism",
     "test:operator": "vitest run tests/unit/operator-recovery.test.ts --no-file-parallelism",
     "web": "npm run build:runtime && node dist/web/start.js",
     "test:onboarding": "vitest run tests/unit/onboarding.test.ts tests/integration/onboarding-api.test.ts tests/e2e/onboarding-flow.test.ts",

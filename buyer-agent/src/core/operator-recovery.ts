@@ -480,6 +480,28 @@ export class OperatorRecovery {
     for (const [family, status] of Object.entries(inventory.families))
       if (status === "MISSING" || status === "UNREADABLE")
         warnings.push(`${family}: ${status.toLowerCase()}`);
+    if (inventory.families["refund-retry-evidence"] !== "PRESENT")
+      for (const task of inventory.tasks)
+        if (
+          task.evidence.transactions?.some((record) => {
+            if (record.role !== "intent" || record.status !== "VALID")
+              return false;
+            try {
+              return (
+                (
+                  new DurableJournal().read(record.path) as {
+                    operation?: { kind?: string };
+                  }
+                )?.operation?.kind === "refund"
+              );
+            } catch {
+              return false;
+            }
+          })
+        )
+          warnings.push(
+            `${task.taskKey}: refund retry evidence family missing`
+          );
     if (inventory.staleTemporaryFiles.length)
       warnings.push(
         `${inventory.staleTemporaryFiles.length} stale temporary file(s)`

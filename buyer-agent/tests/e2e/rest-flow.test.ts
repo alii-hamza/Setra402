@@ -186,11 +186,8 @@ describe("Phase 1/2 live REST/on-chain flow", () => {
           new PublicKey(quote.taskStatePda)
         );
         if (!funded) throw new Error("funded TaskState missing");
-        const waitMs = Math.max(
-          0,
-          (funded.deadlineUnix - Math.floor(Date.now() / 1000) + 1) * 1000
-        );
-        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        while ((await chain.getChainUnixTime()) < funded.deadlineUnix)
+          await new Promise((resolve) => setTimeout(resolve, 150));
         return transport.executeFundedTask(request);
       },
     };

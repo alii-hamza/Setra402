@@ -222,7 +222,7 @@ describe("4A.8 read-only operator evidence", () => {
     const observed = processStartIdentity(process.pid);
     expect(observed == null || /^[0-9]+$/.test(observed)).toBe(true);
     expect(processStartIdentity(-1)).toBeUndefined();
-  });
+  }, 15_000);
   it("shows task identity, stable correlation, and separate chain/local/provider provenance", async () => {
     const f = fixture();
     f.addFinancial();

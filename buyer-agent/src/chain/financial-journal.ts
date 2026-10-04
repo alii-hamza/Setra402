@@ -1,7 +1,8 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Connection } from "@solana/web3.js";
 import { z } from "zod";
-import { DurableJournal } from "../core/journal.js";
+import { DurableJournal, ensureDurableDirectory } from "../core/journal.js";
 import { hashCanonical } from "../manifest/hash.js";
 import { ReconciliationRequired } from "../errors.js";
 
@@ -190,6 +191,23 @@ export class FinancialJournal {
     send: (persist: (value: PreparedTransaction) => void) => Promise<string>
   ): Promise<string> {
     const paths = this.paths(operation);
+    // A refund intent is born with its retry-evidence family present. A later
+    // missing family is a partial restore, not proof that no retry happened.
+    if (operation.kind === "refund") {
+      const retryEvidenceRoot = join(
+        this.directory,
+        "..",
+        "refund-retry-evidence"
+      );
+      if (!existsSync(retryEvidenceRoot)) {
+        if (this.journal.read(paths.intent))
+          throw new ReconciliationRequired(
+            "refund retry evidence family is missing",
+            "RECONCILIATION_REQUIRED"
+          );
+        ensureDurableDirectory(retryEvidenceRoot);
+      }
+    }
     if (
       !this.journal.read(paths.intent) &&
       (this.journal.read(paths.prepared) || this.journal.read(paths.completed))
@@ -239,5 +257,112 @@ export class FinancialJournal {
       // completion persistence fails. Never turn this into an automatic retry.
       throw error;
     }
+  }
+
+  /** One operation-specific refund replacement after authoritative expiry proof.
+   * The original signed evidence is archived before a new signature is prepared.
+   * A second automatic replacement is deliberately outside this V1 authority.
+   */
+  async retryRefund(
+    operation: FinancialOperation,
+    account: (minimumSlot?: number) => Promise<FinancialAccountEvidence>,
+    proveSafe: (signature: string) => Promise<boolean>,
+    send: (persist: (value: PreparedTransaction) => void) => Promise<string>
+  ): Promise<string> {
+    if (operation.kind !== "refund" || !operation.binding)
+      throw new ReconciliationRequired(
+        "refund-only retry operation required",
+        "RECONCILIATION_REQUIRED"
+      );
+    const paths = this.paths(operation);
+    if (!existsSync(join(this.directory, "..", "refund-retry-evidence")))
+      throw new ReconciliationRequired(
+        "refund retry evidence family is missing",
+        "RECONCILIATION_REQUIRED"
+      );
+    const intent = this.journal.read(paths.intent) as {
+      operation: FinancialOperation;
+    } | null;
+    const raw = this.journal.read(paths.prepared);
+    const completion = this.journal.read(paths.completed);
+    if (
+      !intent ||
+      hashCanonical(intent.operation) !== hashCanonical(operation) ||
+      !raw ||
+      completion
+    )
+      throw new ReconciliationRequired(
+        "refund retry journal is incomplete or conflicting",
+        "RECONCILIATION_REQUIRED"
+      );
+    const prepared = preparedSchema.parse(raw);
+    if (prepared.fingerprint !== operation.binding)
+      throw new ReconciliationRequired(
+        "refund retry fingerprint conflict",
+        "RECONCILIATION_REQUIRED"
+      );
+    const id = hashCanonical({
+      programId: operation.programId ?? "test",
+      taskState: operation.taskState,
+      kind: operation.kind,
+    });
+    const archive = join(
+      this.directory,
+      "..",
+      "refund-retry-evidence",
+      `${id}.prior.json`
+    );
+    const previous = this.journal.read(archive) as {
+      operation: FinancialOperation;
+      prepared: PreparedTransaction;
+    } | null;
+    if (
+      previous &&
+      (hashCanonical(previous.operation) !== hashCanonical(operation) ||
+        hashCanonical(previous.prepared) !== hashCanonical(prepared))
+    )
+      throw new ReconciliationRequired(
+        "automatic refund retry history conflicts or is exhausted",
+        "RECONCILIATION_REQUIRED"
+      );
+    if (!(await proveSafe(prepared.signature)))
+      throw new ReconciliationRequired(
+        "prior refund is not authoritatively safe to retry",
+        "UNKNOWN_FINANCIAL_OUTCOME"
+      );
+    if (!previous && !this.journal.publish(archive, { operation, prepared }))
+      throw new ReconciliationRequired(
+        "refund retry history publication conflict",
+        "RECONCILIATION_REQUIRED"
+      );
+    const state = await account();
+    if (state.completed || !state.permits)
+      throw new ReconciliationRequired(
+        "fresh chain state does not permit refund retry",
+        state.completed ? "PROVEN_OCCURRED" : "RECONCILIATION_REQUIRED"
+      );
+    // The caller uses the existing signed refund instruction and signer.
+    // Any lost acknowledgement leaves the new prepared signature in the
+    // canonical financial journal for the next read-only reconciliation.
+    const signature = await send((value) => {
+      preparedSchema.parse(value);
+      if (value.fingerprint !== operation.binding)
+        throw new Error("replacement refund fingerprint changed");
+      this.journal.write(paths.prepared, value);
+    });
+    const replacement = preparedSchema.parse(this.journal.read(paths.prepared));
+    if (
+      replacement.signature !== signature ||
+      replacement.signature === prepared.signature
+    )
+      throw new ReconciliationRequired(
+        "replacement refund signature does not match saved preparation",
+        "UNKNOWN_FINANCIAL_OUTCOME"
+      );
+    this.journal.write(paths.completed, {
+      signature,
+      confirmedAtUnix: Math.floor(Date.now() / 1000),
+    });
+    return signature;
   }
 }

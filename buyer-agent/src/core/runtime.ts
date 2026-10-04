@@ -24,6 +24,7 @@ import { FileChallengeStore } from "../verification/level2/challenge-store.js";
 import { ProtectedTaskController } from "./task-controller.js";
 import { RunCheckpoints } from "./run-checkpoints.js";
 import { normalizeResult } from "../transport/rest-x402.js";
+import { RefundScheduler } from "./refund-scheduler.js";
 
 export interface RuntimeOptions {
   config?: BuyerAgentConfig;
@@ -219,5 +220,29 @@ export function createRuntime(options: RuntimeOptions = {}) {
       return settlement.refundExpired(quote);
     },
   });
-  return { controller, chain, escrow, settlement, transports, config, runners };
+  return {
+    controller,
+    chain,
+    escrow,
+    settlement,
+    transports,
+    config,
+    runners,
+    /** Explicit server-side entry point; web and MCP receive no scheduler authority. */
+    refundScheduler: () =>
+      new RefundScheduler({
+        stateDirectory: directory,
+        sellerUrl: config.sellerUrl,
+        programId: config.programId,
+        expectedMint,
+        buyer: config.buyer.publicKey,
+        verifier: config.verifier.publicKey,
+        reader: chain,
+        submitter: {
+          refundExpired: (quote) => settlement.refundExpired(quote),
+          retryRefundExpired: (request, proveSafe) =>
+            settlement.retryRefundExpired(request.quote, proveSafe),
+        },
+      }),
+  };
 }

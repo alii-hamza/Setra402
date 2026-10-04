@@ -45,6 +45,10 @@ export interface SettlementChain {
     vault: PublicKey,
     buyerTokenAccount: PublicKey
   ): Promise<string>;
+  retryRefund?(
+    quote: TaskQuote,
+    proveSafe: (signature: string) => Promise<boolean>
+  ): Promise<string>;
   cancel(
     taskState: PublicKey,
     vault: PublicKey,
@@ -251,6 +255,31 @@ export class SettlementCoordinator {
     refunded ??= await this.chain.fetchTaskState(taskState);
     if (!refunded || refunded.status !== "refunded")
       throw new TaskConflict("refund confirmed but TaskState is not refunded");
+    return signature;
+  }
+
+  /** Refund-only replacement after 4A.2 proves the original signed attempt
+   * cannot land. It retains the existing buyer signer and refund instruction.
+   */
+  async retryRefundExpired(
+    quote: TaskQuote,
+    proveSafe: (signature: string) => Promise<boolean>
+  ): Promise<string> {
+    const taskState = new PublicKey(quote.taskStatePda);
+    const state = await this.requirePending(taskState);
+    if ((await this.chain.getChainUnixTime()) < state.deadlineUnix)
+      throw new TaskConflict("refund is not yet available");
+    if (!this.chain.retryRefund)
+      throw new TaskConflict("refund retry path is unavailable");
+    const signature = await this.chain.retryRefund(quote, proveSafe);
+    const refunded = await this.chain.fetchTaskState(taskState);
+    if (refunded?.status !== "refunded")
+      throw new TaskConflict("refund retry did not produce Refunded TaskState");
+    if (
+      this.chain.confirmSignature &&
+      !(await this.chain.confirmSignature(signature))
+    )
+      throw new TaskConflict("refund retry signature is unconfirmed");
     return signature;
   }
 

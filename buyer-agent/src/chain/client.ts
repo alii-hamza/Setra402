@@ -13,7 +13,7 @@ import {
   type Signer,
 } from "@solana/web3.js";
 import { ManifestMismatch, TransactionSubmissionError } from "../errors.js";
-import type { TaskStateView, TaskStatus } from "../types.js";
+import type { TaskQuote, TaskStateView, TaskStatus } from "../types.js";
 import { encodeManifestMemo, MEMO_PROGRAM_ID } from "./memo.js";
 import { deriveBuyerAta, deriveNullifierPda } from "./pda.js";
 import type { EscrowChain, InitializeTaskInput } from "./escrow.js";
@@ -590,21 +590,80 @@ export class ChainClient implements EscrowChain {
     buyerTokenAccount: PublicKey
   ): Promise<string> {
     return this.sendRebuilt(
-      async () => [
-        await (this.program.methods as any)
-          .refundTask()
-          .accounts({
-            taskState,
-            buyer: this.buyer,
-            vault,
-            buyerTokenAccount,
-            tokenProgram: TOKEN_PROGRAM_ID,
-          })
-          .instruction(),
-      ],
+      () => this.refundInstructions(taskState, vault, buyerTokenAccount),
       this.options.buyer,
       [this.options.buyer],
-      { kind: "refund", taskState }
+      { kind: "refund", taskState },
+      undefined,
+      undefined,
+      1
+    );
+  }
+
+  private async refundInstructions(
+    taskState: PublicKey,
+    vault: PublicKey,
+    buyerTokenAccount: PublicKey
+  ): Promise<TransactionInstruction[]> {
+    return [
+      await (this.program.methods as any)
+        .refundTask()
+        .accounts({
+          taskState,
+          buyer: this.buyer,
+          vault,
+          buyerTokenAccount,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .instruction(),
+    ];
+  }
+
+  async refundOperation(
+    quote: TaskQuote
+  ): Promise<FinancialRecoveryRequest["operation"]> {
+    const taskState = new PublicKey(quote.taskStatePda);
+    const vault = new PublicKey(quote.vaultPda);
+    const buyerAta = await this.requireBuyerAta(new PublicKey(quote.mint));
+    const instructions = await this.refundInstructions(
+      taskState,
+      vault,
+      buyerAta
+    );
+    return {
+      programId: this.options.programId.toBase58(),
+      taskState: quote.taskStatePda,
+      kind: "refund",
+      binding: this.instructionFingerprint(instructions),
+    };
+  }
+
+  async refundState(quote: TaskQuote): Promise<{
+    state: TaskStateView | null;
+    slot: number;
+    clockUnix: number;
+  }> {
+    const { state, slot } = await this.fetchTaskEvidence(
+      new PublicKey(quote.taskStatePda)
+    );
+    return { state, slot, clockUnix: await this.getChainUnixTime(slot) };
+  }
+
+  async retryRefund(
+    quote: TaskQuote,
+    proveSafe: (signature: string) => Promise<boolean>
+  ): Promise<string> {
+    const taskState = new PublicKey(quote.taskStatePda);
+    const vault = new PublicKey(quote.vaultPda);
+    const buyerAta = await this.requireBuyerAta(new PublicKey(quote.mint));
+    return this.sendRebuilt(
+      () => this.refundInstructions(taskState, vault, buyerAta),
+      this.options.buyer,
+      [this.options.buyer],
+      { kind: "refund", taskState },
+      undefined,
+      proveSafe,
+      1
     );
   }
 
@@ -712,20 +771,12 @@ export class ChainClient implements EscrowChain {
       nullifier?: Uint8Array;
       expected?: Partial<TaskStateView>;
     },
-    onSigned?: (signature: string) => void
+    onSigned?: (signature: string) => void,
+    retryProof?: (signature: string) => Promise<boolean>,
+    maxAttempts = this.maxSendAttempts
   ): Promise<string> {
     const instructions = await buildInstructions();
-    const binding = hashCanonical(
-      instructions.map((instruction) => ({
-        program: instruction.programId.toBase58(),
-        accounts: instruction.keys.map((key) => ({
-          pubkey: key.pubkey.toBase58(),
-          signer: key.isSigner,
-          writable: key.isWritable,
-        })),
-        data: instruction.data.toString("hex"),
-      }))
-    );
+    const binding = this.instructionFingerprint(instructions);
     const identity = {
       programId: this.options.programId.toBase58(),
       taskState: operation.taskState.toBase58(),
@@ -758,22 +809,35 @@ export class ChainClient implements EscrowChain {
               : now < state.deadlineUnix);
       return { completed, permits, state, slot };
     };
-    return this.financial.run(
-      identity,
-      this.options.connection,
-      account,
-      (persist) =>
-        sendRebuiltTransaction({
-          connection: this.options.connection,
-          buildInstructions: async () => instructions,
-          payer,
-          signers,
-          maxAttempts: this.maxSendAttempts,
-          onPrepared: persist,
-          canRebuild: async (minimumSlot) =>
-            (await account(minimumSlot)).permits,
-          ...(onSigned ? { onSigned } : {}),
-        })
+    const send = (persist: (value: PreparedTransaction) => void) =>
+      sendRebuiltTransaction({
+        connection: this.options.connection,
+        buildInstructions: async () => instructions,
+        payer,
+        signers,
+        maxAttempts,
+        onPrepared: persist,
+        canRebuild: async (minimumSlot) => (await account(minimumSlot)).permits,
+        ...(onSigned ? { onSigned } : {}),
+      });
+    return retryProof
+      ? this.financial.retryRefund(identity, account, retryProof, send)
+      : this.financial.run(identity, this.options.connection, account, send);
+  }
+
+  private instructionFingerprint(
+    instructions: TransactionInstruction[]
+  ): string {
+    return hashCanonical(
+      instructions.map((instruction) => ({
+        program: instruction.programId.toBase58(),
+        accounts: instruction.keys.map((key) => ({
+          pubkey: key.pubkey.toBase58(),
+          signer: key.isSigner,
+          writable: key.isWritable,
+        })),
+        data: instruction.data.toString("hex"),
+      }))
     );
   }
 }

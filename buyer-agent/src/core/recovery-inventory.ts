@@ -93,6 +93,7 @@ type Family =
   | "tasks"
   | "manifests"
   | "transactions"
+  | "refund-retry-evidence"
   | "checkpoints"
   | "vouchers"
   | "challenges"
@@ -103,6 +104,7 @@ const buyerFamilies: Family[] = [
   "tasks",
   "manifests",
   "transactions",
+  "refund-retry-evidence",
   "checkpoints",
   "vouchers",
   "challenges",
@@ -113,6 +115,7 @@ const taskName =
   /^([0-9a-f]{64})\.(identity|quote\.json|fund\.intent|funded\.json|run\.intent|result\.json)$/;
 const financialName =
   /^([0-9a-f]{64})\.(intent|transaction\.json|confirmed\.json)$/;
+const refundRetryName = /^([0-9a-f]{64})\.prior\.json$/;
 const checkpointName = /^([0-9a-f]{64})\.(result|report)\.json$/;
 const voucherName = /^([0-9a-f]{64})\.(intent|voucher\.json)$/;
 const sellerName = /^([1-9A-HJ-NP-Za-km-z]{32,44})\.(intent|json)$/;
@@ -370,7 +373,11 @@ export function scanRecoveryInventory(
   const listing = new Map<Family, string[]>();
   for (const family of buyerFamilies) {
     const directory = familyPath(family);
-    families[family] = existsSync(directory) ? "PRESENT" : "MISSING";
+    families[family] = existsSync(directory)
+      ? "PRESENT"
+      : family === "refund-retry-evidence"
+      ? "NOT_CONFIGURED"
+      : "MISSING";
     try {
       listing.set(
         family,
@@ -934,6 +941,61 @@ export function scanRecoveryInventory(
           "financial completion signature conflicts with prepared transaction"
         );
     }
+  }
+
+  for (const name of listing.get("refund-retry-evidence") ?? []) {
+    const match = refundRetryName.exec(name);
+    if (!match) {
+      conflicts.push(`refund-retry-evidence: unexpected record ${name}`);
+      continue;
+    }
+    const stem = match[1]!;
+    const parsed = inspect(
+      familyPath("refund-retry-evidence"),
+      name,
+      "refund-retry-evidence",
+      "prior.json",
+      "buyer_local",
+      (path) =>
+        z
+          .object({
+            operation: financialIntentSchema.shape.operation,
+            prepared: preparedSchema,
+          })
+          .strict()
+          .parse(readJournal(path))
+    );
+    const prior = parsed.value as {
+      operation: z.infer<typeof financialIntentSchema>["operation"];
+      prepared: z.infer<typeof preparedSchema>;
+    } | null;
+    const task = prior ? byPda.get(prior.operation.taskState) : null;
+    if (!task) {
+      unattached.push(parsed.record);
+      conflicts.push(`orphan or corrupt refund retry evidence ${name}`);
+      continue;
+    }
+    add(task, parsed.record);
+    const intent = raw.get(`financial:${stem}:intent`) as
+      | z.infer<typeof financialIntentSchema>
+      | undefined;
+    const current = raw.get(`financial:${stem}:transaction.json`) as
+      | z.infer<typeof preparedSchema>
+      | undefined;
+    if (
+      prior!.operation.kind !== "refund" ||
+      hashCanonical({
+        programId: prior!.operation.programId ?? "test",
+        taskState: prior!.operation.taskState,
+        kind: "refund",
+      }) !== stem ||
+      !intent ||
+      hashCanonical(intent.operation) !== hashCanonical(prior!.operation) ||
+      !current ||
+      prior!.prepared.fingerprint !== prior!.operation.binding ||
+      current.fingerprint !== prior!.operation.binding
+    )
+      conflict(task, "refund retry archive or immutable binding conflicts");
   }
 
   for (const name of listing.get("seller-executions") ?? []) {
