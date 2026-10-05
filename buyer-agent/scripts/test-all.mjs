@@ -39,7 +39,11 @@ for (const name of ["build", "build:runtime", "test:unit", "test:integration"])
   run(process.execPath, [npm, "run", name]);
 // Live E2E tests spawn target/debug/seller-server directly. Rebuild it before
 // that stage so embedded server-owned provider profiles cannot be stale.
-run(cargo, ["build", "--manifest-path", join(root, "seller-server/Cargo.toml")], root);
+run(
+  cargo,
+  ["build", "--manifest-path", join(root, "seller-server/Cargo.toml")],
+  root
+);
 for (const name of ["test:e2e", "test:sandbox", "test:web", "format:check"])
   run(process.execPath, [npm, "run", name]);
 run(
