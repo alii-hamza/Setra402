@@ -67,7 +67,17 @@ export function createControlPlane(options: ControlPlaneOptions): Server {
             buyer: options.buyer,
             writeEnabled: options.registry.writeEnabled,
             csrfToken: token,
-            providerProfiles: PROVIDER_PROFILES,
+            providerProfiles: PROVIDER_PROFILES.map((profile) => ({
+              version: profile.version,
+              provider_id: profile.provider_id,
+              display_name: profile.display_name,
+              connector_type: profile.connector_type,
+              capabilities: profile.capabilities,
+              privacy_support: profile.privacy_support,
+              active: profile.active,
+              recovery_capabilities: profile.recovery_capabilities,
+              requires_secret: profile.secret_refs.length > 0,
+            })),
             runners: defaultRunners().list(),
           });
           return;

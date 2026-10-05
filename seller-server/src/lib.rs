@@ -7,6 +7,7 @@ pub mod pda;
 pub mod provider;
 pub mod registry;
 pub mod rpc;
+pub mod secret;
 pub mod task_state;
 
 use axum::routing::{get, post};

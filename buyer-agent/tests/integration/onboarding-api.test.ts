@@ -58,6 +58,24 @@ async function setup(enabled = true) {
   };
 }
 describe("local onboarding API write boundary", () => {
+  it("exposes capability summaries without secret refs or values", async () => {
+    const s = await setup();
+    try {
+      const response = await fetch(s.origin + "/api/config");
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.providerProfiles[0]).toMatchObject({
+        provider_id: "fixture-echo",
+        connector_type: "LOCAL_FIXTURE",
+        requires_secret: false,
+      });
+      expect(JSON.stringify(body.providerProfiles)).not.toMatch(
+        /secret_refs|secret_value|api_key|authorization/
+      );
+    } finally {
+      await new Promise<void>((resolve) => s.server.close(() => resolve()));
+    }
+  });
   it("valid registration reads back the canonical service", async () => {
     const s = await setup();
     try {

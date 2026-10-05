@@ -103,6 +103,19 @@ pub async fn handle_task(
         .iter()
         .find(|s| s.id == req.service_id)
         .ok_or_else(|| bad_request("unknown service_id"))?;
+    let provider = profile_definition(&service.provider_connector_ref)
+        .ok_or_else(|| internal_error("provider unavailable"))?;
+    if !provider.active
+        || !crate::secret::required_secrets_available(
+            state.secret_resolver.as_ref(),
+            &provider.secret_refs,
+        )
+    {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"provider unavailable"})),
+        ));
+    }
     let transport = headers
         .get("setra-transport")
         .and_then(|v| v.to_str().ok())

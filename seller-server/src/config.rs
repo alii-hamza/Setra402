@@ -2,6 +2,7 @@ use crate::rpc::RpcClient;
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
@@ -32,6 +33,7 @@ pub struct AppState {
     pub execution_store: Option<std::path::PathBuf>,
     pub registry_overlay: Option<std::path::PathBuf>,
     pub fixture_source_url: String,
+    pub secret_resolver: Arc<dyn crate::secret::SecretResolver>,
 
     // Phase 3 Extensions
     pub mint_secret_key: Scalar,
@@ -181,6 +183,19 @@ impl AppState {
         };
         let mint_public_key = mint_secret_key * RISTRETTO_BASEPOINT_POINT;
 
+        let allowed_secret_refs = crate::provider::provider_definitions()
+            .iter()
+            .flat_map(|definition| definition.secret_refs.iter().cloned())
+            .collect::<HashSet<_>>();
+        let secret_file = std::env::var("SETRA_PROVIDER_SECRET_FILE")
+            .ok()
+            .map(std::path::PathBuf::from);
+        let secret_resolver = crate::secret::LocalSecretResolver::from_env_and_file(
+            allowed_secret_refs,
+            secret_file.as_deref(),
+        )
+        .map_err(|error| ConfigError::Invalid("SETRA_PROVIDER_SECRET_FILE", error.to_string()))?;
+
         Ok(AppState {
             rpc: RpcClient::new(rpc_host, rpc_port),
             program_id: env_pubkey("PROGRAM_ID")?,
@@ -205,6 +220,7 @@ impl AppState {
             ),
             fixture_source_url: std::env::var("SETRA_FIXTURE_SOURCE_URL")
                 .unwrap_or_else(|_| "https://example.com/setra-source".into()),
+            secret_resolver: Arc::new(secret_resolver),
             mint_secret_key,
             mint_public_key,
             redis_client,

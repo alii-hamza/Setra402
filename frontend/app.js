@@ -416,7 +416,9 @@ async function init() {
       : "Onboarding read-only · writes disabled";
     $("register").disabled = !config.writeEnabled;
     for (const profile of config.providerProfiles)
-      $("provider-profile").append(option(profile.id, profile.name));
+      $("provider-profile").append(
+        option(profile.provider_id, profile.display_name)
+      );
     levelChanged();
     await refresh();
     resetTask();
