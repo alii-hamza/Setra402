@@ -116,6 +116,16 @@ describe("three-screen browser control plane (simulated chain)", () => {
     expect(await page.locator("#provider-profile option").count()).toBe(4);
     expect(await page.locator("#check-type option").count()).toBe(7);
   });
+  it("switching profiles keeps Screen A within declared capabilities", async () => {
+    await page.selectOption("#provider-profile", "fixture-lead");
+    expect(await page.inputValue("#service-capability")).toBe(
+      "web.scrape.leads"
+    );
+    await page.selectOption("#provider-profile", "fixture-echo");
+    expect(await page.inputValue("#service-capability")).toBe(
+      "setra402.task.echo"
+    );
+  });
   it("registers through Screen A and updates Screen B from the merged registry", async () => {
     await page.fill("#service-id", "browser-service");
     await page.fill("#service-name", "Browser service");

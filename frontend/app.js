@@ -432,6 +432,12 @@ function providerSummary() {
     (candidate) => candidate.provider_id === $("provider-profile").value
   );
   if (!profile) return;
+  // A profile switch must never leave Screen A with a capability the selected
+  // server-owned provider has not declared. Preserve an already compatible
+  // user choice; otherwise use that profile's first allowlisted capability.
+  const capability = $("service-capability");
+  if (!profile.capabilities.includes(capability.value))
+    capability.value = profile.capabilities[0] ?? "";
   const idempotency = profile.recovery_capabilities.idempotency;
   $("provider-summary").textContent = `${profile.display_name} · ${
     profile.connector_type
