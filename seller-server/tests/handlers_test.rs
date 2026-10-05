@@ -324,6 +324,14 @@ async fn state_with_fake_chain_clock(value: Value, clock: Option<i64>) -> AppSta
         registry_overlay: None,
         fixture_source_url: "https://example.com/setra-source".into(),
         secret_resolver: std::sync::Arc::new(seller_server::secret::LocalSecretResolver::empty()),
+        provider_connectors: std::sync::Arc::new(
+            seller_server::provider_connector::ConnectorRegistry::empty(),
+        ),
+        provider_connector_runtime:
+            seller_server::provider_connector::ProviderConnectorRuntime::new(
+                seller_server::provider_connector::ConnectorRuntimePolicy::default(),
+            )
+            .unwrap(),
         mint_secret_key,
         mint_public_key,
         redis_client,

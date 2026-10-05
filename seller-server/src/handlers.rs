@@ -9,6 +9,10 @@ use crate::config::{AppState, PaymentQuote, TaskRequest, TaskResult, PROTOCOL_FE
 use crate::execute::hash_canonical;
 use crate::mint_store::{self, IssuanceIntent, IssuanceReceipt};
 use crate::pda::{task_state_pda, vault_pda};
+use crate::provider::{ConnectorType, IdempotencySupport, ProviderDefinitionV1};
+use crate::provider_connector::{
+    provider_execution_identity, ProviderExecutionRequestV1, ProviderObservationV1,
+};
 use crate::registry::{load_services, policy_hash, profile_definition, ServiceDefinition};
 use crate::task_state::{try_from_account_data, TaskStatus};
 use axum::extract::{Path, Query, State};
@@ -209,22 +213,14 @@ pub async fn handle_task(
 
     let output_hash = hash_canonical(&req.input).map_err(|message| bad_request(message))?;
     let key = task_state_addr.to_string();
-    // One lock covers checking, claiming and executing the synchronous fixture.
-    // The durable exclusive intent also prevents a second process/restart from
-    // repeating an execution whose outcome is unknown.
-    let mut results = state
-        .results
-        .lock()
-        .map_err(|_| internal_error("result store unavailable"))?;
     let saved_path = state
         .execution_store
         .as_ref()
         .map(|dir| dir.join(format!("{key}.json")));
+    let mut durable_result = None;
     if let Some(path) = &saved_path {
         match crate::execution_store::load(path) {
-            Ok(Some(saved)) => {
-                results.insert(key.clone(), saved);
-            }
+            Ok(Some(saved)) => durable_result = Some(saved),
             Ok(None) => {}
             Err(_) => {
                 return Err(internal_error(
@@ -233,7 +229,13 @@ pub async fn handle_task(
             }
         }
     }
-    if let Some(saved) = results.get(&key) {
+    let in_memory_result = state
+        .results
+        .lock()
+        .map_err(|_| internal_error("result store unavailable"))?
+        .get(&key)
+        .cloned();
+    if let Some(saved) = durable_result.or(in_memory_result) {
         if saved.output_hash != output_hash
             || saved.service_id != service.id
             || saved.task_id != task_id.to_string()
@@ -243,16 +245,58 @@ pub async fn handle_task(
                 Json(json!({"error":"task identity reused with different input or service"})),
             ));
         }
-        return Ok(Json(saved.clone()));
+        state
+            .results
+            .lock()
+            .map_err(|_| internal_error("result store unavailable"))?
+            .insert(key.clone(), saved.clone());
+        return Ok(Json(saved));
     }
+    let mut claimed_now = state.execution_store.is_none();
     if let Some(dir) = &state.execution_store {
         std::fs::create_dir_all(dir).map_err(|_| internal_error("execution store unavailable"))?;
-        crate::execution_store::claim(&dir.join(format!("{key}.intent")), &output_hash, &service.id)
-            .map_err(|_| (StatusCode::CONFLICT, Json(json!({"error":"execution already claimed or persistence failed; unresolved outcome requires reconciliation", "classification":"UNKNOWN_EXTERNAL_EFFECT", "reconciliationRequired":true}))))?;
+        let intent_path = dir.join(format!("{key}.intent"));
+        match crate::execution_store::claim(&intent_path, &output_hash, &service.id) {
+            Ok(()) => claimed_now = true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing = crate::execution_store::load_intent(&intent_path)
+                    .map_err(|_| unknown_external_effect("execution intent is corrupt"))?
+                    .ok_or_else(|| unknown_external_effect("execution intent disappeared"))?;
+                if existing.input_hash != output_hash || existing.service_id != service.id {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(
+                            json!({"error":"task identity reused with different input or service"}),
+                        ),
+                    ));
+                }
+            }
+            Err(_) => return Err(internal_error("execution intent persistence failed")),
+        }
     }
     let completed_at_unix = now;
     let mut evidence = Vec::new();
-    let result_value = if service.provider_connector_ref == "fixture-lead" {
+    let result_value = if provider.connector_type != ConnectorType::LocalFixture {
+        let observation = execute_provider(
+            &state,
+            provider,
+            service,
+            &req,
+            task_id,
+            &task_state_addr,
+            &output_hash,
+            claimed_now,
+        )
+        .await?;
+        evidence.push(crate::provider_store::bounded_evidence(&observation));
+        observation
+            .result
+            .ok_or_else(|| unknown_external_effect("provider result is not complete"))?
+    } else if !claimed_now {
+        return Err(unknown_external_effect(
+            "execution already claimed; fixture outcome remains unresolved",
+        ));
+    } else if service.provider_connector_ref == "fixture-lead" {
         let records: Vec<Value> =
             if req.input.get("fixture").and_then(Value::as_str) == Some("invalid") {
                 vec![json!({"name": "Incomplete Lead"})]
@@ -286,7 +330,7 @@ pub async fn handle_task(
     };
     let result_hash = hash_canonical(&result_value).map_err(|message| bad_request(message))?;
     let result = TaskResult {
-        input: req.input,
+        input: req.input.clone(),
         output_hash,
         version: "1".to_string(),
         task_id: task_id.to_string(),
@@ -301,9 +345,174 @@ pub async fn handle_task(
             internal_error("cannot persist completed execution; reconciliation required")
         })?;
     }
-    results.insert(key, result.clone());
+    state
+        .results
+        .lock()
+        .map_err(|_| internal_error("result store unavailable"))?
+        .insert(key, result.clone());
 
     Ok(Json(result))
+}
+
+fn unknown_external_effect(message: &str) -> ApiError {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error":message,
+            "classification":"UNKNOWN_EXTERNAL_EFFECT",
+            "reconciliationRequired":true
+        })),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_provider(
+    state: &AppState,
+    provider: &ProviderDefinitionV1,
+    service: &ServiceDefinition,
+    request: &TaskRequest,
+    task_id: u64,
+    task_state_addr: &Pubkey,
+    input_hash: &str,
+    claimed_now: bool,
+) -> Result<ProviderObservationV1, ApiError> {
+    let directory = state
+        .execution_store
+        .as_ref()
+        .ok_or_else(|| internal_error("durable provider execution store unavailable"))?;
+    let connector = state
+        .provider_connectors
+        .get(&provider.execution_profile)
+        .ok_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"provider connector unavailable"})),
+            )
+        })?;
+    let execution_identity = provider_execution_identity(
+        &task_state_addr.to_string(),
+        &service.id,
+        input_hash,
+        &provider.provider_id,
+    )
+    .map_err(|_| internal_error("provider execution identity unavailable"))?;
+    let provider_request = ProviderExecutionRequestV1 {
+        version: "1".into(),
+        provider_id: provider.provider_id.clone(),
+        execution_identity: execution_identity.clone(),
+        task_state_pda: task_state_addr.to_string(),
+        task_id: task_id.to_string(),
+        service_id: service.id.clone(),
+        input_hash: input_hash.to_string(),
+        input: request.input.clone(),
+    };
+    let expected = crate::provider_store::ProviderDispatchIntentV1 {
+        version: 1,
+        provider_id: provider.provider_id.clone(),
+        connector_type: provider.connector_type.as_str().into(),
+        execution_profile: provider.execution_profile.clone(),
+        execution_identity: execution_identity.clone(),
+        task_state_pda: task_state_addr.to_string(),
+        task_id: task_id.to_string(),
+        service_id: service.id.clone(),
+        input_hash: input_hash.to_string(),
+        secret_versions: crate::secret::secret_version_bindings(
+            state.secret_resolver.as_ref(),
+            &provider.secret_refs,
+        )
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"provider unavailable"})),
+            )
+        })?,
+        state: "UNKNOWN_EXTERNAL_EFFECT".into(),
+    };
+    let (intent_path, observation_path) =
+        crate::provider_store::paths(directory, &task_state_addr.to_string());
+    let existing = crate::provider_store::load_intent(&intent_path)
+        .map_err(|_| unknown_external_effect("provider dispatch intent is corrupt"))?;
+    let provider_claimed_now = existing.is_none();
+    let intent = if let Some(existing) = existing {
+        if existing != expected {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({"error":"provider dispatch binding or credential version mismatch"})),
+            ));
+        }
+        existing
+    } else {
+        if !claimed_now {
+            return Err(unknown_external_effect(
+                "execution was previously claimed without provider evidence",
+            ));
+        }
+        crate::provider_store::claim(&intent_path, &expected)
+            .map_err(|_| unknown_external_effect("provider dispatch claim failed"))?;
+        expected
+    };
+    if let Some(observation) =
+        crate::provider_store::load_observation(&observation_path, &intent)
+            .map_err(|_| unknown_external_effect("provider observation is corrupt"))?
+    {
+        crate::secret::assert_secret_versions(
+            state.secret_resolver.as_ref(),
+            &intent.secret_versions,
+        )
+        .map_err(|_| unknown_external_effect("provider credential version changed"))?;
+        return observation_result(observation);
+    }
+    let observation = if provider_claimed_now {
+        state
+            .provider_connector_runtime
+            .execute(
+                connector,
+                provider,
+                &provider_request,
+                state.secret_resolver.as_ref(),
+            )
+            .await
+            .map_err(|_| unknown_external_effect("provider acknowledgement unavailable"))?
+    } else if provider.recovery_capabilities.status_query
+        && provider.recovery_capabilities.idempotency == IdempotencySupport::Keyed
+    {
+        state
+            .provider_connector_runtime
+            .status(
+                connector,
+                provider,
+                &provider_request,
+                &execution_identity,
+                state.secret_resolver.as_ref(),
+            )
+            .await
+            .map_err(|_| unknown_external_effect("provider status evidence unavailable"))?
+    } else {
+        return Err(unknown_external_effect(
+            "provider has no safe recovery contract",
+        ));
+    };
+    crate::provider_store::complete(&observation_path, &intent, &observation)
+        .map_err(|_| unknown_external_effect("provider observation persistence failed"))?;
+    observation_result(observation)
+}
+
+fn observation_result(
+    observation: ProviderObservationV1,
+) -> Result<ProviderObservationV1, ApiError> {
+    match observation.status.as_str() {
+        "SUCCEEDED" if observation.result.is_some() => Ok(observation),
+        "PENDING" => Err(unknown_external_effect(
+            "provider execution remains pending",
+        )),
+        "FAILED" => Err((
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error":"provider reported a durable failure"})),
+        )),
+        _ => Err(unknown_external_effect(
+            "provider observation is incomplete",
+        )),
+    }
 }
 
 fn fixture_artifact(input: &Value) -> &'static str {
@@ -456,16 +665,15 @@ pub async fn get_execution_evidence(
     .ok_or(StatusCode::CONFLICT)?;
     let profile =
         profile_definition(&service.provider_connector_ref).ok_or(StatusCode::CONFLICT)?;
-    if !profile.active || !profile.capabilities.contains(&service.capability) {
+    if !profile.capabilities.contains(&service.capability) {
         return Err(StatusCode::CONFLICT);
     }
-    let idempotency_key = hash_canonical(&json!({
-        "version":"1",
-        "task_state_pda":pda.to_string(),
-        "service_id":intent.service_id,
-        "input_hash":intent.input_hash,
-        "provider_id":service.provider_connector_ref
-    }))
+    let idempotency_key = provider_execution_identity(
+        &pda.to_string(),
+        &intent.service_id,
+        &intent.input_hash,
+        &service.provider_connector_ref,
+    )
     .map_err(|_| StatusCode::CONFLICT)?;
     response["record_state"] = json!(if result.is_some() {
         "RESULT_PERSISTED"
@@ -482,12 +690,43 @@ pub async fn get_execution_evidence(
     response["connector_type"] = json!(profile.connector_type);
     response["recovery_capabilities"] = json!(profile.recovery_capabilities);
     response["idempotency_key"] = json!(idempotency_key);
+    let (provider_intent_path, provider_observation_path) =
+        crate::provider_store::paths(directory, &pda.to_string());
+    if let Some(provider_intent) = crate::provider_store::load_intent(&provider_intent_path)
+        .map_err(|_| StatusCode::CONFLICT)?
+    {
+        if provider_intent.provider_id != service.provider_connector_ref
+            || provider_intent.connector_type != profile.connector_type.as_str()
+            || provider_intent.execution_profile != profile.execution_profile
+            || provider_intent.execution_identity != response["idempotency_key"]
+            || provider_intent.task_state_pda != pda.to_string()
+            || provider_intent.task_id != task_id.to_string()
+            || provider_intent.service_id != intent.service_id
+            || provider_intent.input_hash != intent.input_hash
+        {
+            return Err(StatusCode::CONFLICT);
+        }
+        if let Some(observation) =
+            crate::provider_store::load_observation(&provider_observation_path, &provider_intent)
+                .map_err(|_| StatusCode::CONFLICT)?
+        {
+            response["provider_execution_id"] = json!(observation.execution_id);
+            response["provider_status"] = json!(observation.status);
+            response["receipt_hash"] = json!(observation.receipt_hash);
+            response["response_commitment"] = json!(observation.response_commitment);
+            response["observed_at_unix"] = json!(observation.observed_at_unix);
+        }
+    }
     if let Some(saved) = result {
-        if profile.recovery_capabilities.durable_receipt {
+        if profile.connector_type == ConnectorType::LocalFixture
+            && profile.recovery_capabilities.durable_receipt
+        {
             response["receipt_hash"] = json!(saved.result_hash);
         }
-        response["response_commitment"] = json!(saved.result_hash);
-        response["observed_at_unix"] = json!(saved.completed_at_unix);
+        if response["response_commitment"].is_null() {
+            response["response_commitment"] = json!(saved.result_hash);
+            response["observed_at_unix"] = json!(saved.completed_at_unix);
+        }
     }
     Ok(Json(response))
 }

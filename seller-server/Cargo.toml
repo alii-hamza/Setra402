@@ -23,6 +23,8 @@ zeroize = "=1.8.2"
 curve25519-dalek = { version = "4.1", features = ["rand_core", "serde"] }
 rand = "0.8"
 redis = { version = "0.25", features = ["tokio-comp"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
+url = "2"
 
 # Shared types from workspace
 task-anchor-types = { path = "../shared/task-anchor-types" }

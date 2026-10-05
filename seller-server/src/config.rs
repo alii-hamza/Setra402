@@ -34,6 +34,8 @@ pub struct AppState {
     pub registry_overlay: Option<std::path::PathBuf>,
     pub fixture_source_url: String,
     pub secret_resolver: Arc<dyn crate::secret::SecretResolver>,
+    pub provider_connectors: Arc<crate::provider_connector::ConnectorRegistry>,
+    pub provider_connector_runtime: crate::provider_connector::ProviderConnectorRuntime,
 
     // Phase 3 Extensions
     pub mint_secret_key: Scalar,
@@ -195,6 +197,43 @@ impl AppState {
             secret_file.as_deref(),
         )
         .map_err(|error| ConfigError::Invalid("SETRA_PROVIDER_SECRET_FILE", error.to_string()))?;
+        let provider_connectors = match std::env::var("SETRA_PROVIDER_CONNECTOR_FILE") {
+            Ok(path) => {
+                let bytes = std::fs::read(path).map_err(|_| {
+                    ConfigError::Invalid(
+                        "SETRA_PROVIDER_CONNECTOR_FILE",
+                        "connector registry unavailable".into(),
+                    )
+                })?;
+                crate::provider_connector::ConnectorRegistry::parse(
+                    &bytes,
+                    crate::provider::provider_definitions(),
+                )
+                .map_err(|error| {
+                    ConfigError::Invalid("SETRA_PROVIDER_CONNECTOR_FILE", error.to_string())
+                })?
+            }
+            Err(std::env::VarError::NotPresent) => {
+                crate::provider_connector::ConnectorRegistry::empty()
+            }
+            Err(_) => {
+                return Err(ConfigError::Invalid(
+                    "SETRA_PROVIDER_CONNECTOR_FILE",
+                    "invalid unicode".into(),
+                ))
+            }
+        };
+        let test_mode = std::env::var("SETRA_PROVIDER_TEST_MODE").as_deref() == Ok("true");
+        let provider_connector_runtime = crate::provider_connector::ProviderConnectorRuntime::new(
+            crate::provider_connector::ConnectorRuntimePolicy {
+                allow_test_http: test_mode,
+                allow_test_private_targets: test_mode,
+                maximum_concurrency: 16,
+            },
+        )
+        .map_err(|error| {
+            ConfigError::Invalid("SETRA_PROVIDER_CONNECTOR_FILE", error.to_string())
+        })?;
 
         Ok(AppState {
             rpc: RpcClient::new(rpc_host, rpc_port),
@@ -221,6 +260,8 @@ impl AppState {
             fixture_source_url: std::env::var("SETRA_FIXTURE_SOURCE_URL")
                 .unwrap_or_else(|_| "https://example.com/setra-source".into()),
             secret_resolver: Arc::new(secret_resolver),
+            provider_connectors: Arc::new(provider_connectors),
+            provider_connector_runtime,
             mint_secret_key,
             mint_public_key,
             redis_client,

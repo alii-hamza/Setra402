@@ -5,6 +5,8 @@ pub mod handlers;
 pub mod mint_store;
 pub mod pda;
 pub mod provider;
+pub mod provider_connector;
+pub mod provider_store;
 pub mod registry;
 pub mod rpc;
 pub mod secret;
