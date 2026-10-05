@@ -24,7 +24,7 @@
     "display_name": "Deterministic lead records",
     "connector_type": "LOCAL_FIXTURE",
     "execution_profile": "fixture-lead",
-    "capabilities": ["web.scrape.leads"],
+    "capabilities": ["web.scrape.leads", "setra402.task.leads"],
     "privacy_support": true,
     "active": true,
     "recovery_capabilities": {
@@ -43,7 +43,7 @@
     "display_name": "Independent source fixture",
     "connector_type": "LOCAL_FIXTURE",
     "execution_profile": "fixture-source",
-    "capabilities": ["web.scrape.leads"],
+    "capabilities": ["web.scrape.leads", "setra402.task.source"],
     "privacy_support": true,
     "active": true,
     "recovery_capabilities": {
@@ -62,7 +62,7 @@
     "display_name": "Pure JavaScript module fixture",
     "connector_type": "LOCAL_FIXTURE",
     "execution_profile": "fixture-code",
-    "capabilities": ["setra402.task.echo"],
+    "capabilities": ["setra402.task.echo", "setra402.task.code"],
     "privacy_support": true,
     "active": true,
     "recovery_capabilities": {
