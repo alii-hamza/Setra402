@@ -419,12 +419,29 @@ async function init() {
       $("provider-profile").append(
         option(profile.provider_id, profile.display_name)
       );
+    providerSummary();
     levelChanged();
     await refresh();
     resetTask();
   } catch (error) {
     notice(error.message, true);
   }
+}
+function providerSummary() {
+  const profile = config?.providerProfiles.find(
+    (candidate) => candidate.provider_id === $("provider-profile").value
+  );
+  if (!profile) return;
+  const idempotency = profile.recovery_capabilities.idempotency;
+  $("provider-summary").textContent = `${profile.display_name} · ${
+    profile.connector_type
+  } · ${
+    profile.active ? "ACTIVE" : "INACTIVE"
+  } · idempotency ${idempotency} · execution ID ${
+    profile.recovery_capabilities.execution_id ? "supported" : "not supported"
+  } · server-side credential ${
+    profile.requires_secret ? "required" : "not required"
+  }`;
 }
 for (const button of document.querySelectorAll("nav button"))
   button.addEventListener("click", () => screen(button.dataset.screen));
@@ -433,6 +450,7 @@ $("refresh-services").addEventListener("click", () =>
   refresh().catch((e) => notice(e.message, true))
 );
 $("policy-level").addEventListener("change", levelChanged);
+$("provider-profile").addEventListener("change", providerSummary);
 $("add-check").addEventListener("click", () => {
   try {
     const policy = JSON.parse($("policy-json").value);

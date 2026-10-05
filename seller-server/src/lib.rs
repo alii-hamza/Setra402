@@ -24,6 +24,11 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/services", get(handlers::list_services))
         .route("/services/:service_id", get(handlers::get_service))
+        .route("/providers", get(handlers::list_provider_health))
+        .route(
+            "/providers/:provider_id/health",
+            get(handlers::get_provider_health),
+        )
         .route("/tasks/:task_id", post(handlers::handle_task))
         .route("/tasks/:task_id/result", get(handlers::get_result))
         .route(

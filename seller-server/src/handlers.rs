@@ -13,7 +13,7 @@ use crate::provider::{ConnectorType, IdempotencySupport, ProviderDefinitionV1};
 use crate::provider_connector::{
     provider_execution_identity, ProviderExecutionRequestV1, ProviderObservationV1,
 };
-use crate::registry::{load_services, policy_hash, profile_definition, ServiceDefinition};
+use crate::registry::{load_services_for, policy_hash, profile_definition_from, ServiceDefinition};
 use crate::task_state::{try_from_account_data, TaskStatus};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -69,27 +69,183 @@ fn payment_required(
     )
 }
 
-pub async fn list_services(State(state): State<AppState>) -> Json<Vec<ServiceDefinition>> {
-    Json(load_services(
+#[derive(Serialize)]
+pub struct ProviderHealthSummary {
+    pub provider_id: String,
+    pub display_name: String,
+    pub connector_type: String,
+    pub activation_state: String,
+    pub health_state: String,
+    pub required_secret_status: String,
+    pub recovery_capabilities: crate::provider::RecoveryCapabilitiesV1,
+    pub can_accept_new_execution: bool,
+}
+
+fn provider_can_accept(state: &AppState, provider: &ProviderDefinitionV1) -> bool {
+    provider.active
+        && crate::secret::required_secrets_available(
+            state.secret_resolver.as_ref(),
+            &provider.secret_refs,
+        )
+        && (provider.connector_type == ConnectorType::LocalFixture
+            || state
+                .provider_connectors
+                .get(&provider.execution_profile)
+                .is_some())
+}
+
+fn provider_summary(state: &AppState, provider: &ProviderDefinitionV1) -> ProviderHealthSummary {
+    let secrets_available = crate::secret::required_secrets_available(
+        state.secret_resolver.as_ref(),
+        &provider.secret_refs,
+    );
+    let connector_available = provider.connector_type == ConnectorType::LocalFixture
+        || state
+            .provider_connectors
+            .get(&provider.execution_profile)
+            .is_some();
+    let can_accept_new_execution = provider.active && secrets_available && connector_available;
+    ProviderHealthSummary {
+        provider_id: provider.provider_id.clone(),
+        display_name: provider.display_name.clone(),
+        connector_type: provider.connector_type.as_str().into(),
+        activation_state: if provider.active {
+            if can_accept_new_execution {
+                "ACTIVE"
+            } else {
+                "DEGRADED"
+            }
+        } else {
+            "INACTIVE"
+        }
+        .into(),
+        health_state: if !provider.active {
+            "INACTIVE"
+        } else if !secrets_available {
+            "MISSING_SECRET"
+        } else if !connector_available {
+            "UNCONFIGURED"
+        } else {
+            "CONFIGURED"
+        }
+        .into(),
+        required_secret_status: if secrets_available {
+            "AVAILABLE"
+        } else {
+            "MISSING"
+        }
+        .into(),
+        recovery_capabilities: provider.recovery_capabilities.clone(),
+        can_accept_new_execution,
+    }
+}
+
+fn services_for_state(state: &AppState) -> Vec<ServiceDefinition> {
+    load_services_for(
         state.registry_overlay.as_deref(),
         state.price,
         state.timeout_seconds,
-    ))
+        &state.provider_catalog,
+    )
+    .into_iter()
+    .filter(|service| {
+        profile_definition_from(&state.provider_catalog, &service.provider_connector_ref)
+            .is_some_and(|provider| provider_can_accept(state, provider))
+    })
+    .collect()
+}
+
+pub async fn list_services(State(state): State<AppState>) -> Json<Vec<ServiceDefinition>> {
+    Json(services_for_state(&state))
 }
 
 pub async fn get_service(
     State(state): State<AppState>,
     Path(service_id): Path<String>,
 ) -> Result<Json<ServiceDefinition>, StatusCode> {
-    load_services(
-        state.registry_overlay.as_deref(),
-        state.price,
-        state.timeout_seconds,
+    services_for_state(&state)
+        .into_iter()
+        .find(|s| s.id == service_id)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// Provider state is operational evidence only. It does not modify, retry, or
+/// reinterpret the durable outcome of any historical task.
+pub async fn list_provider_health(
+    State(state): State<AppState>,
+) -> Json<Vec<ProviderHealthSummary>> {
+    Json(
+        state
+            .provider_catalog
+            .iter()
+            .map(|provider| provider_summary(&state, provider))
+            .collect(),
     )
-    .into_iter()
-    .find(|s| s.id == service_id)
-    .map(Json)
-    .ok_or(StatusCode::NOT_FOUND)
+}
+
+pub async fn get_provider_health(
+    State(state): State<AppState>,
+    Path(provider_id): Path<String>,
+) -> Result<Json<ProviderHealthSummary>, StatusCode> {
+    let provider = profile_definition_from(&state.provider_catalog, &provider_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let mut summary = provider_summary(&state, provider);
+    if summary.can_accept_new_execution && provider.connector_type != ConnectorType::LocalFixture {
+        let connector = state
+            .provider_connectors
+            .get(&provider.execution_profile)
+            .ok_or(StatusCode::CONFLICT)?;
+        if state
+            .provider_connector_runtime
+            .health(connector, provider, state.secret_resolver.as_ref())
+            .await
+            .is_err()
+        {
+            summary.activation_state = "DEGRADED".into();
+            summary.health_state = "UNAVAILABLE".into();
+            summary.can_accept_new_execution = false;
+        } else {
+            summary.health_state = "HEALTHY".into();
+        }
+    } else if summary.can_accept_new_execution {
+        summary.health_state = "HEALTHY".into();
+    }
+    Ok(Json(summary))
+}
+
+async fn ensure_provider_accepting(
+    state: &AppState,
+    provider: &ProviderDefinitionV1,
+) -> Result<(), ApiError> {
+    if !provider_can_accept(state, provider) {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"provider unavailable"})),
+        ));
+    }
+    if provider.connector_type == ConnectorType::LocalFixture {
+        return Ok(());
+    }
+    let connector = state
+        .provider_connectors
+        .get(&provider.execution_profile)
+        .ok_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"provider unavailable"})),
+            )
+        })?;
+    state
+        .provider_connector_runtime
+        .health(connector, provider, state.secret_resolver.as_ref())
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"provider health unavailable"})),
+            )
+        })
 }
 
 pub async fn handle_task(
@@ -98,28 +254,15 @@ pub async fn handle_task(
     headers: HeaderMap,
     Json(req): Json<TaskRequest>,
 ) -> Result<Json<TaskResult>, ApiError> {
-    let registry = load_services(
-        state.registry_overlay.as_deref(),
-        state.price,
-        state.timeout_seconds,
-    );
+    let registry = services_for_state(&state);
     let service = registry
         .iter()
         .find(|s| s.id == req.service_id)
         .ok_or_else(|| bad_request("unknown service_id"))?;
-    let provider = profile_definition(&service.provider_connector_ref)
-        .ok_or_else(|| internal_error("provider unavailable"))?;
-    if !provider.active
-        || !crate::secret::required_secrets_available(
-            state.secret_resolver.as_ref(),
-            &provider.secret_refs,
-        )
-    {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error":"provider unavailable"})),
-        ));
-    }
+    let provider =
+        profile_definition_from(&state.provider_catalog, &service.provider_connector_ref)
+            .ok_or_else(|| internal_error("provider unavailable"))?;
+    ensure_provider_accepting(&state, provider).await?;
     let transport = headers
         .get("setra-transport")
         .and_then(|v| v.to_str().ok())
@@ -655,16 +798,17 @@ pub async fn get_execution_evidence(
             return Err(StatusCode::CONFLICT);
         }
     }
-    let service = load_services(
+    let service = load_services_for(
         state.registry_overlay.as_deref(),
         state.price,
         state.timeout_seconds,
+        &state.provider_catalog,
     )
     .into_iter()
     .find(|service| service.id == intent.service_id)
     .ok_or(StatusCode::CONFLICT)?;
-    let profile =
-        profile_definition(&service.provider_connector_ref).ok_or(StatusCode::CONFLICT)?;
+    let profile = profile_definition_from(&state.provider_catalog, &service.provider_connector_ref)
+        .ok_or(StatusCode::CONFLICT)?;
     if !profile.capabilities.contains(&service.capability) {
         return Err(StatusCode::CONFLICT);
     }

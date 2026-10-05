@@ -6,6 +6,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::response::IntoResponse;
 use http_body_util::BodyExt;
 use seller_server::config::AppState;
 
@@ -184,6 +185,463 @@ async fn retry_changed_service_rejected() {
         StatusCode::CONFLICT
     );
 }
+
+#[derive(Clone, Default)]
+struct NetworkProviderFixture {
+    effects: Arc<std::sync::atomic::AtomicUsize>,
+    executions: Arc<Mutex<HashMap<String, Value>>>,
+    healthy: Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn network_provider_response(request: &Value) -> Value {
+    let result = json!({"provider":"network-fixture","input":request["input"]});
+    let result_hash = seller_server::execute::hash_canonical(&result).unwrap();
+    json!({
+        "version":"1",
+        "provider_id":request["provider_id"],
+        "execution_identity":request["execution_identity"],
+        "task_state_pda":request["task_state_pda"],
+        "task_id":request["task_id"],
+        "service_id":request["service_id"],
+        "input_hash":request["input_hash"],
+        "execution_id":request["execution_identity"],
+        "status":"SUCCEEDED",
+        "result":result,
+        "receipt":{
+            "version":"1",
+            "provider_id":request["provider_id"],
+            "execution_identity":request["execution_identity"],
+            "task_state_pda":request["task_state_pda"],
+            "task_id":request["task_id"],
+            "service_id":request["service_id"],
+            "input_hash":request["input_hash"],
+            "execution_id":request["execution_identity"],
+            "status":"SUCCEEDED",
+            "result_hash":result_hash
+        }
+    })
+}
+
+async fn provider_execute(
+    axum::extract::State(state): axum::extract::State<NetworkProviderFixture>,
+    headers: axum::http::HeaderMap,
+    axum::Json(request): axum::Json<Value>,
+) -> impl axum::response::IntoResponse {
+    let identity = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let lost = request["input"]["mode"] == "lost";
+    state
+        .executions
+        .lock()
+        .unwrap()
+        .entry(identity)
+        .or_insert_with(|| {
+            state
+                .effects
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            request.clone()
+        });
+    if lost {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        return axum::http::StatusCode::NO_CONTENT.into_response();
+    }
+    axum::Json(network_provider_response(&request)).into_response()
+}
+
+async fn provider_status(
+    axum::extract::State(state): axum::extract::State<NetworkProviderFixture>,
+    axum::extract::Path(identity): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.executions.lock().unwrap().get(&identity).cloned() {
+        Some(request) => axum::Json(network_provider_response(&request)).into_response(),
+        None => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn provider_health(
+    axum::extract::State(state): axum::extract::State<NetworkProviderFixture>,
+) -> impl axum::response::IntoResponse {
+    if state.healthy.load(std::sync::atomic::Ordering::SeqCst) {
+        axum::Json(json!({"status":"ok"})).into_response()
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response()
+    }
+}
+
+async fn network_provider_fixture() -> (String, NetworkProviderFixture) {
+    use axum::routing::{get, post};
+    let state = NetworkProviderFixture {
+        healthy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ..Default::default()
+    };
+    let app = axum::Router::new()
+        .route("/execute", post(provider_execute))
+        .route("/status/:identity", get(provider_status))
+        .route("/health", get(provider_health))
+        .with_state(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://localhost:{}", address.port()), state)
+}
+
+fn network_provider(
+    active: bool,
+    status_query: bool,
+    secret_refs: Vec<String>,
+) -> seller_server::provider::ProviderDefinitionV1 {
+    seller_server::provider::ProviderDefinitionV1 {
+        version: "1".into(),
+        provider_id: "network-provider".into(),
+        display_name: "Network provider fixture".into(),
+        connector_type: seller_server::provider::ConnectorType::RestApi,
+        execution_profile: "network-provider-v1".into(),
+        capabilities: vec!["setra402.task.echo".into()],
+        privacy_support: false,
+        active,
+        recovery_capabilities: seller_server::provider::RecoveryCapabilitiesV1 {
+            idempotency: if status_query {
+                seller_server::provider::IdempotencySupport::Keyed
+            } else {
+                seller_server::provider::IdempotencySupport::None
+            },
+            execution_id: status_query,
+            status_query,
+            durable_receipt: status_query,
+            deterministic_replay: status_query,
+            may_produce_non_idempotent_external_effect: !status_query,
+        },
+        secret_refs,
+    }
+}
+
+fn network_service_overlay() -> Value {
+    let policy = json!({
+        "version":"1",
+        "level":1,
+        "checks":[{"type":"json_schema","schema_ref":"generic-object-v1"}]
+    });
+    json!([{
+        "id":"network-service",
+        "name":"Network service",
+        "description":"Local network provider fixture",
+        "capability":"setra402.task.echo",
+        "exposure":"both",
+        "price_base_units":PRICE.to_string(),
+        "timeout_seconds":180,
+        "privacy_support":false,
+        "provider_connector_ref":"network-provider",
+        "verification_policy":policy,
+        "policy_hash":seller_server::execute::hash_canonical(&json!({
+            "version":"1",
+            "level":1,
+            "checks":[{"type":"json_schema","schema_ref":"generic-object-v1"}]
+        })).unwrap()
+    }])
+}
+
+fn connector_registry(
+    base: &str,
+    status_query: bool,
+    providers: &[seller_server::provider::ProviderDefinitionV1],
+) -> seller_server::provider_connector::ConnectorRegistry {
+    let profile = json!({
+        "version":"1",
+        "execution_profile":"network-provider-v1",
+        "connector_type":"REST_API",
+        "rest":{
+            "base_endpoint":base,
+            "execute_path":"/execute",
+            "status_path_template":if status_query { json!("/status/{execution_id}") } else { Value::Null },
+            "health_path":"/health",
+            "allowed_hosts":["localhost"],
+            "connect_timeout_ms":50,
+            "request_timeout_ms":100,
+            "maximum_response_bytes":4096,
+            "redirect_cap":0,
+            "idempotency_header":if status_query { json!("Idempotency-Key") } else { Value::Null },
+            "bearer_secret_ref":Value::Null
+        },
+        "mcp":Value::Null
+    });
+    seller_server::provider_connector::ConnectorRegistry::parse(
+        &serde_json::to_vec(&vec![profile]).unwrap(),
+        providers,
+    )
+    .unwrap()
+}
+
+async fn network_provider_state(
+    provider: seller_server::provider::ProviderDefinitionV1,
+    base: &str,
+) -> (AppState, Pubkey, std::path::PathBuf, std::path::PathBuf) {
+    let (mut state, buyer) = retry_fixture().await;
+    let overlay = std::env::temp_dir().join(format!("setra-network-service-{buyer}.json"));
+    let execution = std::env::temp_dir().join(format!("setra-network-execution-{buyer}"));
+    std::fs::write(&overlay, network_service_overlay().to_string()).unwrap();
+    let mut catalog = seller_server::provider::provider_definitions().to_vec();
+    catalog.push(provider.clone());
+    state.provider_catalog = Arc::new(catalog);
+    state.registry_overlay = Some(overlay.clone());
+    state.execution_store = Some(execution.clone());
+    state.provider_connectors = Arc::new(connector_registry(
+        base,
+        provider.recovery_capabilities.status_query,
+        &state.provider_catalog,
+    ));
+    state.provider_connector_runtime =
+        seller_server::provider_connector::ProviderConnectorRuntime::new(
+            seller_server::provider_connector::ConnectorRuntimePolicy {
+                allow_test_http: true,
+                allow_test_private_targets: true,
+                maximum_concurrency: 4,
+            },
+        )
+        .unwrap();
+    (state, buyer, overlay, execution)
+}
+
+async fn network_post(state: AppState, buyer: Pubkey, input: Value) -> axum::response::Response {
+    seller_server::build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/tasks/7")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"buyer":buyer.to_string(),"input":input,"service_id":"network-service"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn real_provider_lifecycle_persists_evidence_and_recovers_lost_response_once() {
+    let (base, fixture) = network_provider_fixture().await;
+    let (state, buyer, overlay, execution) =
+        network_provider_state(network_provider(true, true, vec![]), &base).await;
+    let services = seller_server::build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/services")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(body_json(services)
+        .await
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|service| service["id"] == "network-service"));
+    let first = network_post(state.clone(), buyer, json!({"mode":"ok"})).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = body_json(first).await;
+    assert_eq!(first_body["result"]["provider"], "network-fixture");
+    let evidence = evidence_get(state.clone(), buyer).await;
+    let evidence_body = body_json(evidence).await;
+    assert_eq!(
+        evidence_body["provider_execution_id"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(evidence_body["provider_status"], "SUCCEEDED");
+    assert!(evidence_body["receipt_hash"].as_str().is_some());
+    let replay = network_post(state.clone(), buyer, json!({"mode":"ok"})).await;
+    assert_eq!(body_json(replay).await, first_body);
+    assert_eq!(fixture.effects.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let lost_buyer = Pubkey::new_unique();
+    let mint = state.mint;
+    let lost_data = encode_task_state(&lost_buyer, &mint, PRICE, 0, 9_999_999_999, false);
+    let lost_encoded =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &lost_data);
+    let mut lost_state = state_with_fake_chain(json!({"data":[lost_encoded,"base64"]})).await;
+    lost_state.mint = mint;
+    lost_state.provider_catalog = state.provider_catalog.clone();
+    lost_state.registry_overlay = state.registry_overlay.clone();
+    lost_state.execution_store = state.execution_store.clone();
+    lost_state.provider_connectors = state.provider_connectors.clone();
+    lost_state.provider_connector_runtime = state.provider_connector_runtime.clone();
+    let first_lost = network_post(lost_state.clone(), lost_buyer, json!({"mode":"lost"})).await;
+    assert_eq!(first_lost.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        body_json(first_lost).await["classification"],
+        "UNKNOWN_EXTERNAL_EFFECT"
+    );
+    let recovered = network_post(lost_state.clone(), lost_buyer, json!({"mode":"lost"})).await;
+    assert_eq!(recovered.status(), StatusCode::OK);
+    assert_eq!(fixture.effects.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    std::fs::remove_file(overlay).unwrap();
+    std::fs::remove_dir_all(execution).unwrap();
+}
+
+#[tokio::test]
+async fn activation_secret_and_health_gates_do_not_rewrite_historical_evidence() {
+    let (base, fixture) = network_provider_fixture().await;
+    let (state, buyer, overlay, execution) =
+        network_provider_state(network_provider(true, true, vec![]), &base).await;
+    assert_eq!(
+        network_post(state.clone(), buyer, json!({"mode":"ok"}))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    fixture
+        .healthy
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let health = seller_server::build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/providers/network-provider/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let health_body = body_json(health).await;
+    assert_eq!(health_body["activation_state"], "DEGRADED");
+    assert_eq!(health_body["health_state"], "UNAVAILABLE");
+    let existing_evidence = evidence_get(state.clone(), buyer).await;
+    assert_eq!(existing_evidence.status(), StatusCode::OK);
+    let new_buyer = Pubkey::new_unique();
+    let new_data = encode_task_state(&new_buyer, &state.mint, PRICE, 0, 9_999_999_999, false);
+    let new_encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &new_data);
+    let mut unhealthy_state = state_with_fake_chain(json!({"data":[new_encoded,"base64"]})).await;
+    unhealthy_state.mint = state.mint;
+    unhealthy_state.provider_catalog = state.provider_catalog.clone();
+    unhealthy_state.registry_overlay = state.registry_overlay.clone();
+    unhealthy_state.execution_store = state.execution_store.clone();
+    unhealthy_state.provider_connectors = state.provider_connectors.clone();
+    unhealthy_state.provider_connector_runtime = state.provider_connector_runtime.clone();
+    assert_eq!(
+        network_post(unhealthy_state, new_buyer, json!({"mode":"ok"}))
+            .await
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+
+    let missing = network_provider(true, true, vec!["missing-token".into()]);
+    let (missing_state, _, missing_overlay, missing_execution) =
+        network_provider_state(missing, &base).await;
+    let providers = seller_server::build_router(missing_state)
+        .oneshot(
+            Request::builder()
+                .uri("/providers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let providers = body_json(providers).await;
+    let missing = providers
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["provider_id"] == "network-provider")
+        .unwrap();
+    assert_eq!(missing["required_secret_status"], "MISSING");
+    assert_eq!(missing["can_accept_new_execution"], false);
+    assert!(!missing.to_string().contains("missing-token"));
+    assert!(missing.get("secret_refs").is_none());
+    let (inactive_state, _, inactive_overlay, inactive_execution) =
+        network_provider_state(network_provider(false, true, vec![]), &base).await;
+    let inactive_providers = seller_server::build_router(inactive_state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/providers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let inactive = body_json(inactive_providers)
+        .await
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["provider_id"] == "network-provider")
+        .unwrap()
+        .clone();
+    assert_eq!(inactive["activation_state"], "INACTIVE");
+    let inactive_services = seller_server::build_router(inactive_state)
+        .oneshot(
+            Request::builder()
+                .uri("/services")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(body_json(inactive_services)
+        .await
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|service| service["id"] != "network-service"));
+    std::fs::remove_file(overlay).unwrap();
+    std::fs::remove_dir_all(execution).unwrap();
+    std::fs::remove_file(missing_overlay).unwrap();
+    let _ = std::fs::remove_dir_all(missing_execution);
+    std::fs::remove_file(inactive_overlay).unwrap();
+    let _ = std::fs::remove_dir_all(inactive_execution);
+}
+
+#[tokio::test]
+async fn provider_without_recovery_contract_stays_unknown_without_redispatch() {
+    let (base, fixture) = network_provider_fixture().await;
+    let (state, buyer, overlay, execution) =
+        network_provider_state(network_provider(true, false, vec![]), &base).await;
+    let first = network_post(state.clone(), buyer, json!({"mode":"lost"})).await;
+    assert_eq!(first.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        body_json(first).await["classification"],
+        "UNKNOWN_EXTERNAL_EFFECT"
+    );
+    let retry = network_post(state.clone(), buyer, json!({"mode":"lost"})).await;
+    assert_eq!(retry.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        body_json(retry).await["classification"],
+        "UNKNOWN_EXTERNAL_EFFECT"
+    );
+    assert_eq!(fixture.effects.load(std::sync::atomic::Ordering::SeqCst), 1);
+    std::fs::remove_file(overlay).unwrap();
+    std::fs::remove_dir_all(execution).unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_provider_dispatch_for_one_task_never_duplicates_external_effect() {
+    let (base, fixture) = network_provider_fixture().await;
+    let (state, buyer, overlay, execution) =
+        network_provider_state(network_provider(true, true, vec![]), &base).await;
+    let (left, right) = tokio::join!(
+        network_post(state.clone(), buyer, json!({"mode":"ok"})),
+        network_post(state.clone(), buyer, json!({"mode":"ok"})),
+    );
+    assert!(
+        left.status() == StatusCode::OK || left.status() == StatusCode::CONFLICT,
+        "left status {}",
+        left.status()
+    );
+    assert!(
+        right.status() == StatusCode::OK || right.status() == StatusCode::CONFLICT,
+        "right status {}",
+        right.status()
+    );
+    assert_eq!(fixture.effects.load(std::sync::atomic::Ordering::SeqCst), 1);
+    std::fs::remove_file(overlay).unwrap();
+    std::fs::remove_dir_all(execution).unwrap();
+}
 #[tokio::test]
 async fn durable_result_replays_after_cache_restart() {
     let (mut state, buyer) = retry_fixture().await;
@@ -323,6 +781,9 @@ async fn state_with_fake_chain_clock(value: Value, clock: Option<i64>) -> AppSta
         execution_store: None,
         registry_overlay: None,
         fixture_source_url: "https://example.com/setra-source".into(),
+        provider_catalog: std::sync::Arc::new(
+            seller_server::provider::provider_definitions().to_vec(),
+        ),
         secret_resolver: std::sync::Arc::new(seller_server::secret::LocalSecretResolver::empty()),
         provider_connectors: std::sync::Arc::new(
             seller_server::provider_connector::ConnectorRegistry::empty(),

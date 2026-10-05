@@ -336,6 +336,7 @@ fn rest_profile(base: &str, execute_path: &str) -> ConnectorProfileV1 {
             base_endpoint: base.into(),
             execute_path: execute_path.into(),
             status_path_template: Some("/status/{execution_id}".into()),
+            health_path: None,
             allowed_hosts: vec!["localhost".into()],
             connect_timeout_ms: 100,
             request_timeout_ms: 100,

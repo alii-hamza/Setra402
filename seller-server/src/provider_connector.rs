@@ -31,6 +31,8 @@ pub struct RestConnectorConfigV1 {
     pub base_endpoint: String,
     pub execute_path: String,
     pub status_path_template: Option<String>,
+    #[serde(default)]
+    pub health_path: Option<String>,
     pub allowed_hosts: Vec<String>,
     pub connect_timeout_ms: u64,
     pub request_timeout_ms: u64,
@@ -203,6 +205,10 @@ impl ConnectorProfileV1 {
                         .status_path_template
                         .as_deref()
                         .is_some_and(|value| !path(value, true))
+                    || rest
+                        .health_path
+                        .as_deref()
+                        .is_some_and(|value| !path(value, false))
                     || (provider.recovery_capabilities.status_query
                         != rest.status_path_template.is_some())
                     || (provider.recovery_capabilities.idempotency == IdempotencySupport::Keyed)
@@ -352,6 +358,47 @@ impl ProviderConnectorRuntime {
         }?;
         bind_secret_versions(&mut observation, provider, resolver)?;
         Ok(observation)
+    }
+
+    /// Bounded operational inspection only. It never dispatches work and is
+    /// deliberately not interpreted as historical execution evidence.
+    pub async fn health(
+        &self,
+        profile: &ConnectorProfileV1,
+        provider: &ProviderDefinitionV1,
+        resolver: &dyn SecretResolver,
+    ) -> Result<(), ConnectorError> {
+        profile.validate(provider)?;
+        // Resolve every declared ref before emitting any network request.
+        secret_version_bindings(resolver, &provider.secret_refs)
+            .map_err(|_| ConnectorError::unavailable("provider credential unavailable"))?;
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|_| ConnectorError::unavailable("connector unavailable"))?;
+        match (&profile.rest, &profile.mcp) {
+            (Some(rest), None) => {
+                if let Some(path) = &rest.health_path {
+                    self.get_json(
+                        join_endpoint(&rest.base_endpoint, path)?,
+                        &rest.allowed_hosts,
+                        rest.connect_timeout_ms,
+                        rest.request_timeout_ms,
+                        rest.maximum_response_bytes,
+                        rest.redirect_cap,
+                        rest.bearer_secret_ref.as_deref(),
+                        resolver,
+                    )
+                    .await?;
+                }
+                Ok(())
+            }
+            (None, Some(mcp)) => self.initialize_mcp(mcp, resolver).await,
+            _ => Err(ConnectorError::configuration(
+                "connector configuration mismatch",
+            )),
+        }
     }
 
     async fn execute_rest(

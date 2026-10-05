@@ -33,6 +33,7 @@ pub struct AppState {
     pub execution_store: Option<std::path::PathBuf>,
     pub registry_overlay: Option<std::path::PathBuf>,
     pub fixture_source_url: String,
+    pub provider_catalog: Arc<Vec<crate::provider::ProviderDefinitionV1>>,
     pub secret_resolver: Arc<dyn crate::secret::SecretResolver>,
     pub provider_connectors: Arc<crate::provider_connector::ConnectorRegistry>,
     pub provider_connector_runtime: crate::provider_connector::ProviderConnectorRuntime,
@@ -185,7 +186,14 @@ impl AppState {
         };
         let mint_public_key = mint_secret_key * RISTRETTO_BASEPOINT_POINT;
 
-        let allowed_secret_refs = crate::provider::provider_definitions()
+        let provider_registry_path = std::env::var("SETRA_PROVIDER_REGISTRY_FILE")
+            .ok()
+            .map(std::path::PathBuf::from);
+        let provider_catalog = crate::provider::load_provider_definitions(
+            provider_registry_path.as_deref(),
+        )
+        .map_err(|error| ConfigError::Invalid("SETRA_PROVIDER_REGISTRY_FILE", error.into()))?;
+        let allowed_secret_refs = provider_catalog
             .iter()
             .flat_map(|definition| definition.secret_refs.iter().cloned())
             .collect::<HashSet<_>>();
@@ -205,13 +213,10 @@ impl AppState {
                         "connector registry unavailable".into(),
                     )
                 })?;
-                crate::provider_connector::ConnectorRegistry::parse(
-                    &bytes,
-                    crate::provider::provider_definitions(),
-                )
-                .map_err(|error| {
-                    ConfigError::Invalid("SETRA_PROVIDER_CONNECTOR_FILE", error.to_string())
-                })?
+                crate::provider_connector::ConnectorRegistry::parse(&bytes, &provider_catalog)
+                    .map_err(|error| {
+                        ConfigError::Invalid("SETRA_PROVIDER_CONNECTOR_FILE", error.to_string())
+                    })?
             }
             Err(std::env::VarError::NotPresent) => {
                 crate::provider_connector::ConnectorRegistry::empty()
@@ -259,6 +264,7 @@ impl AppState {
             ),
             fixture_source_url: std::env::var("SETRA_FIXTURE_SOURCE_URL")
                 .unwrap_or_else(|_| "https://example.com/setra-source".into()),
+            provider_catalog: Arc::new(provider_catalog),
             secret_resolver: Arc::new(secret_resolver),
             provider_connectors: Arc::new(provider_connectors),
             provider_connector_runtime,

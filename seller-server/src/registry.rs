@@ -44,6 +44,18 @@ pub fn load_services(
     price: u64,
     timeout: i64,
 ) -> Vec<ServiceDefinition> {
+    load_services_for(overlay, price, timeout, provider_definitions())
+}
+
+/// The seller's active provider catalog is the single authority for service
+/// normalization and discovery. REST, buyer-facing MCP, and the browser all
+/// consume the services derived from this function.
+pub fn load_services_for(
+    overlay: Option<&std::path::Path>,
+    price: u64,
+    timeout: i64,
+    providers: &[ProviderDefinitionV1],
+) -> Vec<ServiceDefinition> {
     let mut baseline = services().to_vec();
     for service in &mut baseline {
         service.price_base_units = price.to_string();
@@ -55,11 +67,13 @@ pub fn load_services(
             "fixture-echo"
         }
         .into();
-        service.provider_type = profile_definition(&service.provider_connector_ref)
-            .expect("baseline provider profile")
-            .connector_type
-            .as_str()
-            .into();
+        let Some(profile) = profile_definition_from(providers, &service.provider_connector_ref)
+        else {
+            // A replacement catalog which omits the checked-in fixture
+            // providers is not a valid catalog for this seller deployment.
+            return Vec::new();
+        };
+        service.provider_type = profile.connector_type.as_str().into();
         service.policy_hash = policy_hash(service);
     }
     let Some(path) = overlay else {
@@ -96,11 +110,13 @@ pub fn load_services(
             || price == 0
             || !(5..=3600).contains(&service.timeout_seconds)
             || !["rest", "mcp", "both"].contains(&service.exposure.as_str())
-            || !profile_definition(&service.provider_connector_ref).is_some_and(|profile| {
-                profile.active
-                    && profile.capabilities.contains(&service.capability)
-                    && (!service.privacy_support || profile.privacy_support)
-            })
+            || !profile_definition_from(providers, &service.provider_connector_ref).is_some_and(
+                |profile| {
+                    profile.active
+                        && profile.capabilities.contains(&service.capability)
+                        && (!service.privacy_support || profile.privacy_support)
+                },
+            )
             || !matches!(service.verification_policy["level"].as_u64(), Some(1 | 2))
             || policy.as_ref().ok() != Some(&service.policy_hash)
         {
@@ -115,7 +131,14 @@ pub fn load_services(
 static SERVICES: OnceLock<Vec<ServiceDefinition>> = OnceLock::new();
 
 pub fn profile_definition(profile_id: &str) -> Option<&'static ProviderDefinitionV1> {
-    provider_definitions()
+    profile_definition_from(provider_definitions(), profile_id)
+}
+
+pub fn profile_definition_from<'a>(
+    providers: &'a [ProviderDefinitionV1],
+    profile_id: &str,
+) -> Option<&'a ProviderDefinitionV1> {
+    providers
         .iter()
         .find(|profile| profile.provider_id == profile_id)
 }
