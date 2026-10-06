@@ -131,17 +131,6 @@ body {
   overflow-x: hidden;
 }
 
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: -2;
-  background: url("/background.png") center top / cover no-repeat;
-  filter: blur(10px) saturate(0.35) brightness(0.4);
-  transform: scale(1.04);
-  pointer-events: none;
-}
-
 body::after {
   content: "";
   position: fixed;
@@ -153,13 +142,6 @@ body::after {
     rgba(10, 12, 16, 0.94) 100%
   );
   pointer-events: none;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  body::before {
-    filter: none;
-    transform: none;
-  }
 }
 
 button,
