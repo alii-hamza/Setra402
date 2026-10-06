@@ -6,22 +6,24 @@ import {
   inspectOperatorHealth,
 } from "./operator-health.js";
 import { metricsText } from "./operator-telemetry.js";
+import { loadOperatorSettings } from "../runtime-config.js";
 
 export async function runOperatorCli(
   args: string[],
   env: NodeJS.ProcessEnv = process.env
 ): Promise<string> {
   const command = args[0];
-  const root = resolve(env.SETRA_STATE_DIR ?? ".setra-state");
+  const settings = loadOperatorSettings(env);
+  const root = settings.stateDirectory;
   const operator = new OperatorRecovery({
     stateDirectory: root,
-    ...(env.SETRA_SELLER_EXECUTION_DIR
-      ? { sellerExecutionDirectory: resolve(env.SETRA_SELLER_EXECUTION_DIR) }
+    ...(settings.sellerExecutionDirectory
+      ? { sellerExecutionDirectory: settings.sellerExecutionDirectory }
       : {}),
-    ...(env.SETRA_SELLER_MINT_DIR
-      ? { sellerMintDirectory: resolve(env.SETRA_SELLER_MINT_DIR) }
+    ...(settings.sellerMintDirectory
+      ? { sellerMintDirectory: settings.sellerMintDirectory }
       : {}),
-    ...(env.SETRA_SELLER_URL ? { sellerUrl: env.SETRA_SELLER_URL } : {}),
+    ...(settings.sellerUrl ? { sellerUrl: settings.sellerUrl } : {}),
   });
   if (command === "task") {
     if (args.length !== 2) throw new Error("usage: operator task <task-key>");
@@ -47,12 +49,10 @@ export async function runOperatorCli(
       await inspectOperatorHealth(
         root,
         defaultHealthProbes({
-          ...(env.ROLE_C_RPC_URL ? { rpcUrl: env.ROLE_C_RPC_URL } : {}),
-          ...(env.SETRA_SELLER_URL ? { sellerUrl: env.SETRA_SELLER_URL } : {}),
-          ...(env.SETRA_REDIS_HOST ? { redisHost: env.SETRA_REDIS_HOST } : {}),
-          ...(env.SETRA_REDIS_PORT
-            ? { redisPort: Number(env.SETRA_REDIS_PORT) }
-            : {}),
+          ...(settings.rpcUrl ? { rpcUrl: settings.rpcUrl } : {}),
+          ...(settings.sellerUrl ? { sellerUrl: settings.sellerUrl } : {}),
+          ...(settings.redisHost ? { redisHost: settings.redisHost } : {}),
+          ...(settings.redisPort ? { redisPort: settings.redisPort } : {}),
         })
       )
     );

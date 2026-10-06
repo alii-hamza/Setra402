@@ -4,6 +4,12 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Keypair } from "@solana/web3.js";
 import { loadConfig } from "../../src/config.js";
+import {
+  loadControlPlaneSettings,
+  loadMcpBridgeSettings,
+  loadOperatorSettings,
+  loadRuntimeSettings,
+} from "../../src/runtime-config.js";
 
 describe("strict configuration", () => {
   it("loads persisted buyer and verifier keypairs without generating identities", () => {
@@ -52,5 +58,70 @@ describe("strict configuration", () => {
         SETTLEMENT_SAFETY_MARGIN_SEC: "0",
       })
     ).toThrow(/SETTLEMENT_SAFETY_MARGIN_SEC/);
+  });
+
+  it("validates public runtime settings separately from signer configuration", () => {
+    const mint = Keypair.generate().publicKey.toBase58();
+    const settings = loadRuntimeSettings({
+      EXPECTED_MINT: mint,
+      SETRA_STATE_DIR: "state",
+      MCP_URL: "http://127.0.0.1:4102/mcp",
+    });
+
+    expect(settings.expectedMint.toBase58()).toBe(mint);
+    expect(settings.stateDirectory).toMatch(/[\\/]state$/);
+    expect(settings.mcpUrl).toBe("http://127.0.0.1:4102/mcp");
+    expect(() => loadRuntimeSettings({})).toThrow(/EXPECTED_MINT/);
+  });
+
+  it("rejects malformed control-plane ports and boolean flags", () => {
+    expect(
+      loadControlPlaneSettings(
+        { MCP_PORT: "4102", WEB_PORT: "4103" },
+        "services.local.json"
+      )
+    ).toMatchObject({
+      mcpPort: 4102,
+      webPort: 4103,
+      onboardingWriteEnabled: false,
+    });
+    expect(() =>
+      loadControlPlaneSettings(
+        { MCP_PORT: "0", WEB_PORT: "4103" },
+        "services.local.json"
+      )
+    ).toThrow(/MCP_PORT/);
+    expect(() =>
+      loadControlPlaneSettings(
+        { SETRA_ONBOARDING_WRITE_ENABLED: "yes" },
+        "services.local.json"
+      )
+    ).toThrow(/SETRA_ONBOARDING_WRITE_ENABLED/);
+  });
+
+  it("loads operator and standalone MCP settings without signer secrets", () => {
+    expect(
+      loadOperatorSettings({
+        RPC_URL: "http://127.0.0.1:8899",
+        SELLER_URL: "http://127.0.0.1:3001/",
+        REDIS_URL: "redis://127.0.0.1:6380",
+        SETRA_REFUND_SCHEDULER_ENABLED: "false",
+      })
+    ).toMatchObject({
+      rpcUrl: "http://127.0.0.1:8899",
+      sellerUrl: "http://127.0.0.1:3001",
+      redisHost: "127.0.0.1",
+      redisPort: 6380,
+      refundSchedulerEnabled: false,
+    });
+    expect(
+      loadMcpBridgeSettings({
+        MCP_PORT: "4202",
+        SELLER_URL: "http://127.0.0.1:3001/",
+      })
+    ).toEqual({
+      mcpPort: 4202,
+      sellerUrl: "http://127.0.0.1:3001",
+    });
   });
 });

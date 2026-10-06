@@ -1,11 +1,13 @@
-import { resolve } from "node:path";
-import { PublicKey } from "@solana/web3.js";
 import { createRuntime } from "./runtime.js";
 import {
   RefundScheduler,
   refundSchedulerMetricsText,
   structuredRefundSchedulerLog,
 } from "./refund-scheduler.js";
+import {
+  loadOperatorSettings,
+  loadRuntimeSettings,
+} from "../runtime-config.js";
 
 const mode = process.argv[2];
 const limit = Number(process.argv[3] ?? "100");
@@ -16,15 +18,17 @@ if (
   limit > 1_000
 )
   throw new Error("usage: refund:schedule -- once|loop [limit 1..1000]");
-if (process.env.SETRA_REFUND_SCHEDULER_ENABLED !== "true")
+const operatorSettings = loadOperatorSettings();
+if (!operatorSettings.refundSchedulerEnabled)
   throw new Error("set SETRA_REFUND_SCHEDULER_ENABLED=true on the server");
 
-const runtime = createRuntime();
+const runtimeSettings = loadRuntimeSettings();
+const runtime = createRuntime({ settings: runtimeSettings });
 const scheduler = new RefundScheduler({
-  stateDirectory: resolve(process.env.SETRA_STATE_DIR ?? ".setra-state"),
+  stateDirectory: runtimeSettings.stateDirectory,
   sellerUrl: runtime.config.sellerUrl,
   programId: runtime.config.programId,
-  expectedMint: new PublicKey(process.env.EXPECTED_MINT ?? ""),
+  expectedMint: runtimeSettings.expectedMint,
   buyer: runtime.config.buyer.publicKey,
   verifier: runtime.config.verifier.publicKey,
   reader: runtime.chain,

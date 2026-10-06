@@ -25,9 +25,15 @@ import { ProtectedTaskController } from "./task-controller.js";
 import { RunCheckpoints } from "./run-checkpoints.js";
 import { normalizeResult } from "../transport/rest-x402.js";
 import { RefundScheduler } from "./refund-scheduler.js";
+import {
+  loadRuntimeSettings,
+  type RuntimeSettings,
+} from "../runtime-config.js";
+import { SandboxLeases } from "../verification/level2/sandbox-leases.js";
 
 export interface RuntimeOptions {
   config?: BuyerAgentConfig;
+  settings?: RuntimeSettings;
   expectedMint?: PublicKey;
   directory?: string;
   mcpUrl?: string;
@@ -36,11 +42,18 @@ export interface RuntimeOptions {
 }
 export function createRuntime(options: RuntimeOptions = {}) {
   const config = options.config ?? loadConfig();
-  const expectedMint =
-    options.expectedMint ?? new PublicKey(process.env.EXPECTED_MINT ?? "");
-  const directory = resolve(
-    options.directory ?? process.env.SETRA_STATE_DIR ?? ".setra-state"
-  );
+  const settings =
+    options.settings ??
+    loadRuntimeSettings({
+      ...process.env,
+      ...(options.expectedMint
+        ? { EXPECTED_MINT: options.expectedMint.toBase58() }
+        : {}),
+      ...(options.directory ? { SETRA_STATE_DIR: options.directory } : {}),
+      ...(options.mcpUrl ? { MCP_URL: options.mcpUrl } : {}),
+    });
+  const expectedMint = options.expectedMint ?? settings.expectedMint;
+  const directory = resolve(options.directory ?? settings.stateDirectory);
   const connection = new Connection(config.rpcUrl, "confirmed");
   const chain = new ChainClient({
     connection,
@@ -83,13 +96,16 @@ export function createRuntime(options: RuntimeOptions = {}) {
     });
   const transports = {
     REST: new RestX402Transport(config.sellerUrl, normalizeQuote),
-    MCP: new McpTransport(
-      options.mcpUrl ?? process.env.MCP_URL ?? "http://127.0.0.1:3002/mcp",
-      normalizeQuote
-    ),
+    MCP: new McpTransport(options.mcpUrl ?? settings.mcpUrl, normalizeQuote),
   };
   const sourceClient = options.sourceClient ?? new SourceClient();
-  const sandbox = options.sandbox ?? new DockerSandbox();
+  const sandbox =
+    options.sandbox ??
+    new DockerSandbox(
+      { executable: "docker" },
+      65_536,
+      new SandboxLeases(join(directory, "sandbox-leases"))
+    );
   const runners = defaultRunners(),
     challenges = new FileChallengeStore(join(directory, "challenges"));
   const checkpoints = new RunCheckpoints(join(directory, "checkpoints"));

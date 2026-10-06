@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { z } from "zod";
 
-const publicKeyString = z
+export const publicKeyStringSchema = z
   .string()
   .min(1)
   .transform((value, ctx) => {
@@ -18,12 +18,12 @@ const publicKeyString = z
   });
 
 const configSchema = z.object({
-  PROGRAM_ID: publicKeyString,
+  PROGRAM_ID: publicKeyStringSchema,
   RPC_URL: z.string().url(),
   SELLER_URL: z.string().url(),
   BUYER_KEYPAIR_PATH: z.string().min(1),
   VERIFIER_KEYPAIR_PATH: z.string().min(1),
-  PROTOCOL_TREASURY_ADDRESS: publicKeyString,
+  PROTOCOL_TREASURY_ADDRESS: publicKeyStringSchema,
   SETTLEMENT_SAFETY_MARGIN_SEC: z
     .string()
     .regex(/^\d+$/)
