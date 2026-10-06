@@ -123,12 +123,43 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: var(--bg-base);
+  background-color: var(--bg-base);
   color: var(--text-primary);
   font-family: var(--font-body);
   font-size: var(--text-base);
   line-height: var(--leading-normal);
   overflow-x: hidden;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background: url("/background.png") center top / cover no-repeat;
+  filter: blur(10px) saturate(0.35) brightness(0.4);
+  transform: scale(1.04);
+  pointer-events: none;
+}
+
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(
+    180deg,
+    rgba(10, 12, 16, 0.72) 0%,
+    rgba(10, 12, 16, 0.94) 100%
+  );
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body::before {
+    filter: none;
+    transform: none;
+  }
 }
 
 button,
@@ -208,8 +239,8 @@ p {
   flex-direction: column;
   width: var(--rail-width);
   height: 100vh;
-  background: var(--bg-surface);
-  border-right: 1px solid var(--line-subtle);
+  background: rgba(17, 20, 26, 0.88);
+  backdrop-filter: blur(14px);
   overflow: hidden;
 }
 
@@ -221,29 +252,14 @@ p {
   text-decoration: none;
   color: var(--text-primary);
   flex-shrink: 0;
-  border-bottom: 1px solid var(--line-subtle);
 }
 
-.brand-symbol {
-  display: grid;
-  place-items: center;
-  width: 32px;
+.brand-logo {
+  display: block;
+  width: auto;
   height: 32px;
-  border-radius: var(--radius-lg);
-  background: var(--accent-primary);
-  color: var(--text-primary);
-  font-size: 16px;
-  font-weight: var(--weight-bold);
-  font-family: var(--font-display);
-  letter-spacing: -1px;
-  flex-shrink: 0;
-}
-
-.brand-name {
-  font-weight: var(--weight-semibold);
-  font-size: 15px;
-  font-family: var(--font-display);
-  letter-spacing: -0.3px;
+  max-width: calc(var(--rail-width) - var(--space-10));
+  object-fit: contain;
 }
 
 /* Navigation items — the spine */
@@ -253,17 +269,6 @@ p {
   flex-direction: column;
   padding: var(--space-3) 0;
   position: relative;
-}
-
-/* Spine line — connects navigation nodes */
-.nav-rail-items::before {
-  content: "";
-  position: absolute;
-  top: var(--space-6);
-  bottom: var(--space-6);
-  left: 28px;
-  width: 1px;
-  background: var(--line-default);
 }
 
 .nav-item {
@@ -319,16 +324,10 @@ p {
 /* Navigation rail footer: health + status */
 .nav-rail-footer {
   padding: var(--space-4) var(--space-5);
-  border-top: 1px solid var(--line-subtle);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
   flex-shrink: 0;
-}
-
-.nav-rail-env {
-  color: var(--text-tertiary);
-  font-size: var(--text-xs);
 }
 
 /* Scroll progress indicator on the right edge of the rail */
@@ -2087,8 +2086,8 @@ footer {
     top: 0;
     z-index: 30;
     padding: var(--space-3) var(--space-4);
-    background: var(--bg-surface);
-    border-bottom: 1px solid var(--line-subtle);
+    background: rgba(17, 20, 26, 0.92);
+    backdrop-filter: blur(14px);
     width: 100%;
     box-sizing: border-box;
   }

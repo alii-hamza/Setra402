@@ -5,6 +5,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
+import { healthDisplayLabel } from "../lib/health-labels";
 
 export function Badge({
   children,
@@ -86,7 +87,10 @@ export function ServiceCard({
           <h2>{name}</h2>
           <p>{description}</p>
         </div>
-        <HealthIndicator state={health} label={`Registry ${health}`} />
+        <HealthIndicator
+          state={health}
+          label={`Registry ${healthDisplayLabel(health, "Unknown")}`}
+        />
       </div>
       <div className="service-facts">
         <span>

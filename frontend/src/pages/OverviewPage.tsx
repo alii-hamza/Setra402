@@ -1,8 +1,8 @@
 import { Card } from "../components/Card";
 import { Button } from "../components/Button";
-import { HealthIndicator, MetricCard } from "../components/Primitives";
-import { StatusBadge } from "../components/StatusBadge";
+import { MetricCard } from "../components/Primitives";
 import type { Screen } from "../components/TopNav";
+import { operatorHealthDetail, operatorHealthHeadline } from "../lib/health-labels";
 
 export function OverviewPage({
   hidden,
@@ -71,18 +71,9 @@ export function OverviewPage({
           ●
         </div>
         <div>
-          <strong>
-            Setra402 {health === "HEALTHY" ? "operational" : "status"}
-          </strong>
-          <p>
-            {health === "HEALTHY"
-              ? "All required local services report healthy. Transaction state machine active."
-              : health
-              ? `Operator health reports ${health.toLowerCase()}. Review resource status before operating.`
-              : "Checking operator health from the local control plane."}
-          </p>
+          <strong>Setra402 {operatorHealthHeadline(health)}</strong>
+          <p>{operatorHealthDetail(health)}</p>
         </div>
-        <HealthIndicator state={health} label={health ?? "Checking"} />
         <Button className="text-button" onClick={() => onNavigate("audit")}>
           View activity <span aria-hidden="true">→</span>
         </Button>
@@ -94,7 +85,6 @@ export function OverviewPage({
           <h1 tabIndex={-1}>Overview</h1>
           <p>Conditional settlement and autonomous transactions on Solana.</p>
         </div>
-        <StatusBadge status="neutral">Local Environment</StatusBadge>
       </div>
 
       {/* ── Section 02: System State ── */}
@@ -288,16 +278,6 @@ export function OverviewPage({
         </div>
       </section>
 
-      <section className="overview-health">
-        <h2>Environment health</h2>
-        <div className="health-summary">
-          <HealthIndicator
-            state={health}
-            label={health ?? "Health unavailable"}
-          />
-          <span>Live operator health supplied by the local control plane.</span>
-        </div>
-      </section>
     </section>
   );
 }

@@ -18,6 +18,7 @@ import {
   requestRefund,
 } from "./lib/api";
 import { chainLabels, pretty, verificationLabels } from "./lib/format";
+import { healthDisplayLabel } from "./lib/health-labels";
 import type {
   AppConfig,
   OperatorHealth,
@@ -236,7 +237,6 @@ export default function App() {
   const taskProvider = config?.providerProfiles.find(
     (profile) => profile.provider_id === selectedService?.provider_connector_ref
   );
-  const healthStatus = operatorHealth?.status ?? "UNAVAILABLE";
   const report: VerificationReport | undefined = outcome?.report;
 
   const showNotice = useCallback((text: string, error = false) => {
@@ -635,12 +635,7 @@ export default function App() {
     }));
 
   return (
-    <AppShell
-      screen={screen}
-      onScreenChange={setScreen}
-      health={healthStatus}
-      notice={notice}
-    >
+    <AppShell screen={screen} onScreenChange={setScreen} notice={notice}>
       <OverviewPage
         hidden={screen !== "overview"}
         health={operatorHealth?.status}
@@ -680,7 +675,10 @@ export default function App() {
             Registry health:{" "}
             <HealthIndicator
               state={operatorHealth?.resources.providerCatalog}
-              label={operatorHealth?.resources.providerCatalog ?? "Unavailable"}
+              label={healthDisplayLabel(
+                operatorHealth?.resources.providerCatalog,
+                "Unavailable",
+              )}
             />
           </span>
           <Button
