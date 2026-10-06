@@ -48,8 +48,8 @@ COPY programs ./programs
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
     mkdir -p seller-server/src \
-    && : > seller-server/src/lib.rs \
-    && : > seller-server/src/main.rs \
+    && echo "pub fn dummy() {}" > seller-server/src/lib.rs \
+    && echo "fn main() {}" > seller-server/src/main.rs \
     && cargo build --release --package seller-server
 
 # --- Layer 3: real sources, incremental build ---------------------------------

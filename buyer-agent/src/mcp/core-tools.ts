@@ -39,7 +39,7 @@ export class CoreMcpTools implements ToolHandler {
     private readonly controller: ProtectedTaskController,
     private readonly sellerUrl: string,
     private readonly buyer: string
-  ) { }
+  ) {}
   async call(name: string, args: unknown) {
     if (name === "discover_services") {
       z.object({}).strict().parse(args);

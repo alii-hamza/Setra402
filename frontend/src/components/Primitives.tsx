@@ -19,14 +19,21 @@ export function Badge({
 export function HealthIndicator({
   state,
   label,
+  showPulse = true,
 }: {
   state: string | undefined;
   label: string;
+  showPulse?: boolean;
 }) {
   const tone =
     state === "HEALTHY" ? "good" : state === "DEGRADED" ? "warn" : "bad";
+  const isHealthy = state === "HEALTHY" && showPulse;
   return (
-    <span className={`health-indicator health-${tone}`}>
+    <span
+      className={`health-indicator health-${tone} ${
+        isHealthy ? "is-healthy" : ""
+      }`}
+    >
       <span aria-hidden="true" />
       {label}
     </span>

@@ -11,6 +11,7 @@ ROLE_B_HANDOVER.md
 SELLER_SERVER_INTEGRATION.md
 .setra-state/
 buyer-agent/dist/
+frontend/dist/
 seller-server/config/services.local.json
 seller-server/config/services.local.json.lock
 seller-server/config/services.local.json.*.tmp

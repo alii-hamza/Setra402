@@ -5,3 +5,6 @@ node_modules
 dist
 build
 test-ledger
+buyer-agent/scripts/README.md
+buyer-agent/scripts/verify-baseline.js
+buyer-agent/scripts/verify-baseline.ts

@@ -5,8 +5,13 @@ import {
   normalizedHost,
   type PreparedDevelopmentEnvironment,
 } from "./environment.js";
+import {
+  inspectPortOwner,
+  ownerAction,
+  type PortOwner,
+} from "./process-ownership.js";
 
-type CheckState = "OK" | "START_REQUIRED" | "UNAVAILABLE";
+type CheckState = "OK" | "START_REQUIRED" | "BLOCKED" | "UNAVAILABLE";
 
 export interface DevelopmentCheck {
   name: string;
@@ -21,6 +26,7 @@ export interface DevelopmentProbes {
   docker(): Promise<boolean>;
   seller(): Promise<boolean>;
   portAvailable(port: number, host: string): Promise<boolean>;
+  inspectPort?(port: number): Promise<PortOwner> | PortOwner;
 }
 
 function portAvailable(port: number, host: string): Promise<boolean> {
@@ -51,7 +57,22 @@ function createDefaultProbes(
     docker: health.docker!,
     seller: health.seller!,
     portAvailable,
+    inspectPort: (port) =>
+      inspectPortOwner(
+        port,
+        prepared.repositoryRoot,
+        prepared.runtime.stateDirectory
+      ),
   };
+}
+
+async function blockedDetail(
+  port: number,
+  probes: DevelopmentProbes
+): Promise<string> {
+  const owner = await probes.inspectPort?.(port);
+  if (!owner) return `port ${port} is already in use`;
+  return `:${port} — ${owner.detail}. ${ownerAction(owner)}`;
 }
 
 export async function safeProbe(
@@ -85,8 +106,10 @@ export async function runDevelopmentPreflight(
   ]);
   checks.push({
     name: "Solana",
-    state: rpc ? "OK" : "UNAVAILABLE",
-    detail: prepared.endpoints.solana,
+    state: rpc ? "OK" : "START_REQUIRED",
+    detail: rpc
+      ? prepared.endpoints.solana
+      : `${prepared.endpoints.solana} (will retry)`,
   });
   checks.push({
     name: "Redis",
@@ -107,19 +130,17 @@ export async function runDevelopmentPreflight(
       state: "OK",
       detail: prepared.endpoints.seller,
     });
-  } else if (
-    await probes.portAvailable(sellerPort, normalizedHost(sellerUrl.hostname))
-  ) {
-    checks.push({
-      name: "Seller",
-      state: "START_REQUIRED",
-      detail: prepared.endpoints.seller,
-    });
   } else {
+    const available = await probes.portAvailable(
+      sellerPort,
+      normalizedHost(sellerUrl.hostname)
+    );
     checks.push({
       name: "Seller",
-      state: "UNAVAILABLE",
-      detail: `port ${sellerPort} is already in use`,
+      state: available ? "START_REQUIRED" : "BLOCKED",
+      detail: available
+        ? prepared.endpoints.seller
+        : await blockedDetail(sellerPort, probes),
     });
   }
   for (const [name, port] of [
@@ -129,16 +150,18 @@ export async function runDevelopmentPreflight(
     const available = await probes.portAvailable(port, "127.0.0.1");
     checks.push({
       name,
-      state: available ? "START_REQUIRED" : "UNAVAILABLE",
+      state: available ? "START_REQUIRED" : "BLOCKED",
       detail: available
         ? name === "MCP"
           ? prepared.endpoints.mcp
           : prepared.endpoints.control
-        : `port ${port} is already in use`,
+        : await blockedDetail(port, probes),
     });
   }
   return {
-    ready: checks.every((check) => check.state !== "UNAVAILABLE"),
+    ready: checks.every(
+      (check) => check.state !== "UNAVAILABLE" && check.state !== "BLOCKED"
+    ),
     checks,
   };
 }

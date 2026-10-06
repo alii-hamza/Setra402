@@ -1,5 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { readFileSync } from "node:fs";
+import { extname, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { ServiceRegistry, PROVIDER_PROFILES } from "../registry/services.js";
 import { jsonSafe } from "../mcp/protocol.js";
@@ -22,7 +24,8 @@ export interface ControlPlaneOptions {
 export function createControlPlane(options: ControlPlaneOptions): Server {
   const token = randomBytes(32).toString("hex");
   const directory =
-    options.clientDirectory ?? new URL("../../../frontend/", import.meta.url);
+    options.clientDirectory ??
+    new URL("../../../frontend/dist/", import.meta.url);
   const discover =
     options.discover ??
     (async () => {
@@ -91,26 +94,40 @@ export function createControlPlane(options: ControlPlaneOptions): Server {
           reply(200, { services: await discover() });
           return;
         }
-        const file = (
-          {
-            "/": "index.html",
-            "/app.js": "app.js",
-            "/styles.css": "styles.css",
-          } as Record<string, string>
-        )[pathname];
-        if (!file) {
+        const root = resolve(fileURLToPath(directory));
+        const filePath = resolve(
+          root,
+          `.${pathname === "/" ? "/index.html" : pathname}`
+        );
+        if (filePath !== root && !filePath.startsWith(`${root}${sep}`)) {
           reply(404, { error: "not found" });
           return;
         }
+        let bytes: Buffer;
+        try {
+          bytes = readFileSync(filePath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            reply(404, { error: "not found" });
+            return;
+          }
+          throw error;
+        }
+        const contentTypes: Record<string, string> = {
+          ".html": "text/html; charset=utf-8",
+          ".js": "text/javascript; charset=utf-8",
+          ".css": "text/css; charset=utf-8",
+          ".svg": "image/svg+xml",
+          ".png": "image/png",
+          ".woff": "font/woff",
+          ".woff2": "font/woff2",
+        };
         res
           .writeHead(200, {
-            "content-type": file.endsWith(".html")
-              ? "text/html; charset=utf-8"
-              : file.endsWith(".css")
-              ? "text/css; charset=utf-8"
-              : "text/javascript; charset=utf-8",
+            "content-type":
+              contentTypes[extname(filePath)] ?? "application/octet-stream",
           })
-          .end(readFileSync(new URL(file, directory)));
+          .end(bytes);
         return;
       }
       if (req.method !== "POST") {

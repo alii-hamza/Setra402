@@ -14,7 +14,7 @@ export function jsonSafe(value: unknown): unknown {
 }
 
 export class McpDispatcher {
-  constructor(private readonly handler: ToolHandler) { }
+  constructor(private readonly handler: ToolHandler) {}
   async dispatch(value: unknown): Promise<unknown | null> {
     const req = value as {
       jsonrpc?: unknown;

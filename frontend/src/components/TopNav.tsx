@@ -1,5 +1,3 @@
-import { Button } from "./Button";
-
 export type Screen =
   | "overview"
   | "onboarding"
@@ -15,25 +13,28 @@ export function TopNav({
   onChange: (screen: Screen) => void;
 }) {
   const items: Array<[Screen, string, string]> = [
-    ["overview", "", "Overview"],
-    ["onboarding", "", "Services"],
-    ["lifecycle", "", "Tasks"],
-    ["audit", "", "Activity"],
-    ["developers", "", "Developers"],
+    ["overview", "◉", "Overview"],
+    ["onboarding", "◎", "Services"],
+    ["lifecycle", "◌", "Tasks"],
+    ["audit", "⟳", "Activity"],
+    ["developers", "</>", "Developers"],
   ];
   return (
-    <nav aria-label="Screens">
-      {items.map(([id, number, title]) => (
-        <Button
+    <nav aria-label="Screens" className="nav-rail-items">
+      {items.map(([id, icon, title]) => (
+        <button
           key={id}
           type="button"
+          className="nav-item"
           data-screen={id}
           aria-current={active === id ? "page" : undefined}
           onClick={() => onChange(id)}
         >
-          {number && <span>{number}</span>}
-          {title}
-        </Button>
+          <span className="nav-item-icon" aria-hidden="true">
+            {icon}
+          </span>
+          <span className="nav-item-label">{title}</span>
+        </button>
       ))}
     </nav>
   );

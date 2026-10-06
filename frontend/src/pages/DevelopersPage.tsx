@@ -110,7 +110,7 @@ POST ${origin}/api/tasks/refund`;
         </Card>
       )}
       {activeTab === "Examples" && (
-        <Card>
+        <Card variant="data">
           <div className="section-title-row">
             <div>
               <div className="eyebrow">REQUEST EXAMPLE</div>

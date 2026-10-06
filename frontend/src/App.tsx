@@ -1115,7 +1115,7 @@ export default function App() {
           )}
         </Card>
         <div className="task-detail-layout">
-          <Card>
+          <Card variant="emphasized">
             <div className="section-title-row">
               <div>
                 <div className="eyebrow">APPLICATION LIFECYCLE</div>
@@ -1386,7 +1386,7 @@ export default function App() {
             </div>
           )}
         </Card>
-        <Card>
+        <Card variant={report?.passed ? "emphasized" : "default"}>
           <div className="section-title-row">
             <div>
               <div className="eyebrow">AUTHORITATIVE REPORT</div>
