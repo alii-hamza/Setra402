@@ -14,7 +14,7 @@ export function jsonSafe(value: unknown): unknown {
 }
 
 export class McpDispatcher {
-  constructor(private readonly handler: ToolHandler) {}
+  constructor(private readonly handler: ToolHandler) { }
   async dispatch(value: unknown): Promise<unknown | null> {
     const req = value as {
       jsonrpc?: unknown;
@@ -48,7 +48,12 @@ export class McpDispatcher {
         return reply({
           protocolVersion: "2025-03-26",
           capabilities: { tools: {} },
-          serverInfo: { name: "setra402", version: "0.3.0" },
+          serverInfo: {
+            name: "Setra402",
+            version: "0.3.0",
+            description:
+              "Trust and conditional-settlement layer for autonomous agent payments. Setra402 provides escrow, verification, and protected execution for external service calls.",
+          },
         });
       if (req.method === "ping") return reply({});
       if (req.method === "tools/list")

@@ -42,7 +42,8 @@ function screen(id) {
   document.querySelector(`#${id} h1`).focus({ preventScroll: true });
 }
 async function api(path, body) {
-  const response = await fetch(path, {
+  const fullPath = path.startsWith('/api') ? `http://localhost:3333${path}` : path;
+  const response = await fetch(fullPath, {
     method: body === undefined ? "GET" : "POST",
     headers: {
       "content-type": "application/json",
@@ -247,14 +248,13 @@ function renderTask() {
     Execution: outcome?.result
       ? "Submitted"
       : outcome?.funded
-      ? "Funded"
-      : "Not run",
+        ? "Funded"
+        : "Not run",
     "Result hash": outcome?.result?.resultHash,
     Verification: report ? (report.passed ? "Passed" : "Failed") : "Not run",
     "Refund deadline": chain?.deadlineUnix
-      ? `${new Date(chain.deadlineUnix * 1000).toLocaleString()} (${
-          chain.deadlineUnix
-        })`
+      ? `${new Date(chain.deadlineUnix * 1000).toLocaleString()} (${chain.deadlineUnix
+      })`
       : null,
     "Chain action": chainLabels[taskStatus?.chainAction] ?? "Funding required",
   });
@@ -273,22 +273,21 @@ function renderAudit() {
       ? "PASS"
       : "FAIL"
     : "NOT RUN";
-  $("verdict").className = `badge ${
-    report ? (report.passed ? "pass" : "fail") : ""
-  }`;
+  $("verdict").className = `badge ${report ? (report.passed ? "pass" : "fail") : ""
+    }`;
   $("audit-checks").replaceChildren();
   descriptionList(
     $("audit-details"),
     report
       ? {
-          Task: report.taskId,
-          Service: report.serviceId,
-          "Verification level": report.level,
-          "Manifest hash": report.manifestHash,
-          "Policy hash": report.policyHash,
-          "Result hash": report.resultHash,
-          Verifier: report.verifierPubkey,
-        }
+        Task: report.taskId,
+        Service: report.serviceId,
+        "Verification level": report.level,
+        "Manifest hash": report.manifestHash,
+        "Policy hash": report.policyHash,
+        "Result hash": report.resultHash,
+        Verifier: report.verifierPubkey,
+      }
       : {}
   );
   let group;
@@ -296,16 +295,16 @@ function renderAudit() {
     const nextGroup = ["source_sampling", "test_suite"].includes(check.type)
       ? "Level 2 · Independent verification"
       : [
-          "json_schema",
-          "record_count",
-          "required_fields",
-          "unique",
-          "freshness",
-          "artifact_integrity",
-          "solana_state",
-        ].includes(check.type)
-      ? "Level 1 · Deterministic checks"
-      : "Contract integrity";
+        "json_schema",
+        "record_count",
+        "required_fields",
+        "unique",
+        "freshness",
+        "artifact_integrity",
+        "solana_state",
+      ].includes(check.type)
+        ? "Level 1 · Deterministic checks"
+        : "Contract integrity";
     if (nextGroup !== group) {
       $("audit-checks").append(node("h3", nextGroup));
       group = nextGroup;
@@ -388,10 +387,10 @@ async function taskAction(action) {
       action === "quote"
         ? "Payment quote ready."
         : action === "fund"
-        ? "Escrow funding confirmed."
-        : result.status === "verification_failed"
-        ? "Verification failed. The task remains Pending until refund eligibility."
-        : "Task state updated."
+          ? "Escrow funding confirmed."
+          : result.status === "verification_failed"
+            ? "Verification failed. The task remains Pending until refund eligibility."
+            : "Task state updated."
     );
   } catch (error) {
     notice(error.message, true);
@@ -439,15 +438,11 @@ function providerSummary() {
   if (!profile.capabilities.includes(capability.value))
     capability.value = profile.capabilities[0] ?? "";
   const idempotency = profile.recovery_capabilities.idempotency;
-  $("provider-summary").textContent = `${profile.display_name} · ${
-    profile.connector_type
-  } · ${
-    profile.active ? "ACTIVE" : "INACTIVE"
-  } · idempotency ${idempotency} · execution ID ${
-    profile.recovery_capabilities.execution_id ? "supported" : "not supported"
-  } · server-side credential ${
-    profile.requires_secret ? "required" : "not required"
-  }`;
+  $("provider-summary").textContent = `${profile.display_name} · ${profile.connector_type
+    } · ${profile.active ? "ACTIVE" : "INACTIVE"
+    } · idempotency ${idempotency} · execution ID ${profile.recovery_capabilities.execution_id ? "supported" : "not supported"
+    } · server-side credential ${profile.requires_secret ? "required" : "not required"
+    }`;
 }
 for (const button of document.querySelectorAll("nav button"))
   button.addEventListener("click", () => screen(button.dataset.screen));

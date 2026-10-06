@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "verify:baseline": "npx tsc --module NodeNext --moduleResolution NodeNext --target ES2022 --outDir scripts scripts/verify-baseline.ts && node scripts/verify-baseline.js",
     "test:recovery": "npm run build:runtime && vitest run phase35 --no-file-parallelism",
     "build": "tsc -p tsconfig.json",
     "build:runtime": "tsc -p tsconfig.runtime.json",

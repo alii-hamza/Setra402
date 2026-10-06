@@ -1,0 +1,22 @@
+{
+    "baselineCommit": "956cef9",
+    "baselineBranch": "agent-validator",
+    "baselineTests": {
+        "total": 450,
+        "passed": 450,
+        "failed": 0
+    },
+    "verifiedAt": "2026-01-06T14:50:00.000Z",
+    "invariants": [
+        "Anchor account model",
+        "PDA seeds",
+        "Protocol economics",
+        "SettlementCoordinator authority",
+        "RefundScheduler authority",
+        "VerificationPolicy semantics",
+        "UNKNOWN_EXTERNAL_EFFECT",
+        "UNKNOWN_FINANCIAL_OUTCOME",
+        "Financial journal safety",
+        "Private/nullifier behavior"
+    ]
+}

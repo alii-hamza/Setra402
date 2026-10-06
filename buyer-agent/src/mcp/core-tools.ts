@@ -9,7 +9,7 @@ export class CoreMcpTools implements ToolHandler {
     {
       name: "discover_services",
       description:
-        "Discover registry services and committed verification policies",
+        "Discover available protected services with pricing, verification policies, and capability metadata. Returns services that can be called with payment protection via escrow and verification.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -22,12 +22,13 @@ export class CoreMcpTools implements ToolHandler {
         description: (
           {
             protected_call:
-              "Get a quote or complete the same funded task through verification and the shared SettlementCoordinator",
+              "Execute a service with payment protection via escrow and verification. Payment is held in escrow until verification passes. If verification fails, payment is refunded. Use this when you need guarantees that a service will deliver as promised or your payment will be returned. Note: Unknown outcomes (UNKNOWN_EXTERNAL_EFFECT) require manual investigation - do NOT blindly retry.",
             fund_task:
-              "Fund the quoted escrow using the configured local buyer signer",
-            task_status: "Read real on-chain status and refund eligibility",
+              "Add funds to an existing task using the configured local buyer signer. Funding is explicit - services cannot automatically debit more funds. Must occur before task execution completes.",
+            task_status:
+              "Check the status and outcome of a task. Returns execution state, verification result, and settlement status. Task outcomes: 'settled' (payment released), 'verification_failed' (refund available), 'unknown' (requires investigation). Unknown outcomes indicate provider ambiguity - consult operator before retrying.",
             refund_task:
-              "Request an eligible timeout refund through the shared coordinator",
+              "Request refund for a failed or expired task through the shared coordinator. Refunds are only available when verification fails or the task expires without completion. Manual refund requests are rejected if task is still active or already settled.",
           } as Record<string, string>
         )[name]!,
         inputSchema: protectedInputSchema,
@@ -38,7 +39,7 @@ export class CoreMcpTools implements ToolHandler {
     private readonly controller: ProtectedTaskController,
     private readonly sellerUrl: string,
     private readonly buyer: string
-  ) {}
+  ) { }
   async call(name: string, args: unknown) {
     if (name === "discover_services") {
       z.object({}).strict().parse(args);
