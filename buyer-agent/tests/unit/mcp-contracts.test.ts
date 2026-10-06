@@ -1,6 +1,7 @@
 import { Keypair } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import { protectedCallSchema } from "../../src/mcp/contracts.js";
+import { CoreMcpTools } from "../../src/mcp/core-tools.js";
 import { McpDispatcher } from "../../src/mcp/protocol.js";
 const valid = {
   task_id: "18446744073709551615",
@@ -67,7 +68,11 @@ describe("MCP hostile input boundary", () => {
         params: { protocolVersion: "2025-03-26" },
       })
     ).toMatchObject({
-      result: { protocolVersion: "2025-03-26", capabilities: { tools: {} } },
+      result: {
+        protocolVersion: "2025-03-26",
+        capabilities: { tools: {} },
+        serverInfo: { name: "setra402", version: "0.3.0" },
+      },
     });
     expect(
       await protocol.dispatch({
@@ -78,5 +83,31 @@ describe("MCP hostile input boundary", () => {
     expect(
       await protocol.dispatch({ jsonrpc: "2.0", id: 2, method: "tools/list" })
     ).toMatchObject({ result: { tools: [] } });
+  });
+
+  it("publishes only the five agent-facing product tools with safety guidance", () => {
+    const tools = new CoreMcpTools(
+      {} as ConstructorParameters<typeof CoreMcpTools>[0],
+      "http://127.0.0.1:3001",
+      valid.buyer
+    ).tools;
+    expect(tools.map((tool) => tool.name)).toEqual([
+      "discover_services",
+      "protected_call",
+      "fund_task",
+      "task_status",
+      "refund_task",
+    ]);
+    const descriptions = tools.map((tool) => tool.description).join(" ");
+    // Current descriptions are terse - will be enhanced in Batch A R6
+    expect(descriptions).toContain("verification");
+    expect(descriptions).toContain("escrow");
+    expect(descriptions).toContain("refund");
+    expect(tools[1]?.inputSchema).toMatchObject({
+      properties: {
+        task_id: { type: "string", pattern: expect.any(String) },
+        input: { type: "object" },
+      },
+    });
   });
 });
