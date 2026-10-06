@@ -16,6 +16,7 @@ export interface ControlPlaneOptions {
   buyer: string;
   sellerUrl: string;
   discover?: () => Promise<unknown[]>;
+  health?: () => Promise<unknown>;
   clientDirectory?: URL;
 }
 export function createControlPlane(options: ControlPlaneOptions): Server {
@@ -80,6 +81,10 @@ export function createControlPlane(options: ControlPlaneOptions): Server {
             })),
             runners: defaultRunners().list(),
           });
+          return;
+        }
+        if (pathname === "/api/health" && options.health) {
+          reply(200, await options.health());
           return;
         }
         if (pathname === "/api/services" || pathname === "/services") {

@@ -113,6 +113,7 @@ export interface OperatorSettings {
   sellerUrl?: string;
   redisHost?: string;
   redisPort?: number;
+  redisTls?: boolean;
   mcpUrl: string;
   refundSchedulerEnabled: boolean;
 }
@@ -123,7 +124,9 @@ export function loadOperatorSettings(
   const rpcUrl = env.RPC_URL ?? env.ROLE_C_RPC_URL;
   const sellerUrl =
     env.SELLER_URL ?? env.SETRA_SELLER_URL ?? env.ROLE_C_SELLER_URL;
-  const redisUrl = env.REDIS_URL;
+  const redisUrl =
+    env.REDIS_URL ??
+    (env.SETRA_REDIS_HOST ? undefined : "redis://127.0.0.1:6379");
   const redisHost = env.SETRA_REDIS_HOST;
   const parsed = z
     .object({
@@ -140,13 +143,15 @@ export function loadOperatorSettings(
         "SETRA_REFUND_SCHEDULER_ENABLED"
       ),
     })
-    .parse({ ...env, RPC_URL: rpcUrl, SELLER_URL: sellerUrl });
-  let parsedRedis: URL | undefined;
-  if (parsed.REDIS_URL) {
-    parsedRedis = new URL(parsed.REDIS_URL);
-    if (!["redis:", "rediss:"].includes(parsedRedis.protocol))
-      throw new Error("REDIS_URL must use redis or rediss");
-  }
+    .parse({
+      ...env,
+      RPC_URL: rpcUrl,
+      SELLER_URL: sellerUrl,
+      REDIS_URL: redisUrl,
+    });
+  const parsedRedis = parsed.REDIS_URL ? new URL(parsed.REDIS_URL) : undefined;
+  if (parsedRedis && !["redis:", "rediss:"].includes(parsedRedis.protocol))
+    throw new Error("REDIS_URL must use redis or rediss");
   return {
     stateDirectory: resolve(parsed.SETRA_STATE_DIR),
     ...(parsed.SETRA_SELLER_EXECUTION_DIR
@@ -163,6 +168,7 @@ export function loadOperatorSettings(
           redisPort: parsedRedis?.port
             ? Number(parsedRedis.port)
             : parsed.SETRA_REDIS_PORT,
+          redisTls: parsedRedis?.protocol === "rediss:",
         }
       : {}),
     mcpUrl: parsed.MCP_URL,

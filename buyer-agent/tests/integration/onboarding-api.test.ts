@@ -39,6 +39,13 @@ async function setup(enabled = true) {
     async discover() {
       return registry.list();
     },
+    async health() {
+      return {
+        version: "1",
+        status: "DEGRADED",
+        resources: { rpc: "HEALTHY", providerSecrets: "DEGRADED" },
+      };
+    },
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const origin = `http://127.0.0.1:${
@@ -58,6 +65,24 @@ async function setup(enabled = true) {
   };
 }
 describe("local onboarding API write boundary", () => {
+  it("exposes read-only readiness without session or secret material", async () => {
+    const s = await setup();
+    try {
+      const response = await fetch(s.origin + "/api/health");
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toMatchObject({
+        version: "1",
+        status: "DEGRADED",
+        resources: { rpc: "HEALTHY", providerSecrets: "DEGRADED" },
+      });
+      expect(JSON.stringify(body)).not.toMatch(
+        /csrfToken|secret_ref|secret_value|keypair|api_key/i
+      );
+    } finally {
+      await new Promise<void>((resolve) => s.server.close(() => resolve()));
+    }
+  });
   it("exposes capability summaries without secret refs or values", async () => {
     const s = await setup();
     try {

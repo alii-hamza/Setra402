@@ -53,7 +53,13 @@ export async function runOperatorCli(
           ...(settings.sellerUrl ? { sellerUrl: settings.sellerUrl } : {}),
           ...(settings.redisHost ? { redisHost: settings.redisHost } : {}),
           ...(settings.redisPort ? { redisPort: settings.redisPort } : {}),
-        })
+          ...(settings.redisTls !== undefined
+            ? { redisTls: settings.redisTls }
+            : {}),
+          mcpUrl: settings.mcpUrl,
+        }),
+        1_073_741_824,
+        { refundSchedulerEnabled: settings.refundSchedulerEnabled }
       )
     );
   throw new Error("usage: operator <task|list|validate|metrics|health>");

@@ -7,6 +7,7 @@
     "test:recovery": "npm run build:runtime && vitest run phase35 --no-file-parallelism",
     "build": "tsc -p tsconfig.json",
     "build:runtime": "tsc -p tsconfig.runtime.json",
+    "dev:setra": "npm run build:runtime && node dist/dev/launcher.js",
     "mcp:server": "npm run build:runtime && node dist/mcp/server.js",
     "mcp:stdio": "node dist/mcp/stdio.js",
     "operator:inspect": "npm run build:runtime && node dist/core/operator-cli.js",

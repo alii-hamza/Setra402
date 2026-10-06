@@ -4,7 +4,15 @@ import { ServiceRegistry } from "../registry/services.js";
 import { createControlPlane } from "./server.js";
 import { createMcpServer } from "../mcp/protocol.js";
 import { SellerMcpAdapter } from "../mcp/seller-adapter.js";
-import { loadControlPlaneSettings } from "../runtime-config.js";
+import {
+  loadControlPlaneSettings,
+  loadOperatorSettings,
+  loadRuntimeSettings,
+} from "../runtime-config.js";
+import {
+  defaultHealthProbes,
+  inspectOperatorHealth,
+} from "../core/operator-health.js";
 const settings = loadControlPlaneSettings(
   process.env,
   fileURLToPath(
@@ -14,8 +22,19 @@ const settings = loadControlPlaneSettings(
     )
   )
 );
+const mcpUrl = `http://127.0.0.1:${settings.mcpPort}/mcp`;
+const runtimeSettings = loadRuntimeSettings({
+  ...process.env,
+  MCP_URL: mcpUrl,
+});
 const runtime = createRuntime({
-  mcpUrl: `http://127.0.0.1:${settings.mcpPort}/mcp`,
+  settings: runtimeSettings,
+});
+const operatorSettings = loadOperatorSettings({
+  ...process.env,
+  RPC_URL: runtime.config.rpcUrl,
+  SELLER_URL: runtime.config.sellerUrl,
+  MCP_URL: mcpUrl,
 });
 const registry = new ServiceRegistry(
   new URL("../../../seller-server/config/services.json", import.meta.url),
@@ -31,6 +50,26 @@ createControlPlane({
   controller: runtime.controller,
   buyer: runtime.config.buyer.publicKey.toBase58(),
   sellerUrl: runtime.config.sellerUrl,
+  health: () =>
+    inspectOperatorHealth(
+      runtimeSettings.stateDirectory,
+      defaultHealthProbes({
+        rpcUrl: runtime.config.rpcUrl,
+        sellerUrl: runtime.config.sellerUrl,
+        ...(operatorSettings.redisHost
+          ? { redisHost: operatorSettings.redisHost }
+          : {}),
+        ...(operatorSettings.redisPort
+          ? { redisPort: operatorSettings.redisPort }
+          : {}),
+        ...(operatorSettings.redisTls !== undefined
+          ? { redisTls: operatorSettings.redisTls }
+          : {}),
+        mcpUrl,
+      }),
+      1_073_741_824,
+      { refundSchedulerEnabled: operatorSettings.refundSchedulerEnabled }
+    ),
 }).listen(settings.webPort, "127.0.0.1", () =>
   process.stderr.write(
     `Setra control plane: http://127.0.0.1:${settings.webPort}\n`

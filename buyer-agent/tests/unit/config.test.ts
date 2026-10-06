@@ -124,4 +124,17 @@ describe("strict configuration", () => {
       sellerUrl: "http://127.0.0.1:3001",
     });
   });
+
+  it("preserves TLS Redis settings for operational health probes", () => {
+    expect(
+      loadOperatorSettings({
+        SETRA_STATE_DIR: ".setra-state",
+        REDIS_URL: "rediss://cache.example.test:6380",
+      })
+    ).toMatchObject({
+      redisHost: "cache.example.test",
+      redisPort: 6380,
+      redisTls: true,
+    });
+  });
 });
