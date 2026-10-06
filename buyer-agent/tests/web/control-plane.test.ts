@@ -1,6 +1,7 @@
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeAll, afterAll, describe, it, expect } from "vitest";
 import { ServiceRegistry } from "../../src/registry/services.js";
 import { createControlPlane } from "../../src/web/server.js";
@@ -12,6 +13,12 @@ let browser: any,
   origin: string,
   server: ReturnType<typeof createControlPlane>;
 const browserErrors: string[] = [];
+function readTree(directory: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name);
+    return entry.isDirectory() ? readTree(path) : [readFileSync(path, "utf8")];
+  });
+}
 const registry = new ServiceRegistry(
   new URL("../../../seller-server/config/services.json", import.meta.url),
   join(
@@ -90,6 +97,14 @@ beforeAll(async () => {
     async discover() {
       return registry.list();
     },
+    async health() {
+      return {
+        version: "1",
+        status: "HEALTHY",
+        resources: { providerCatalog: "HEALTHY" },
+        diskFreeBytes: null,
+      };
+    },
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -107,12 +122,12 @@ afterAll(async () => {
   server?.closeAllConnections();
   await new Promise<void>((r) => server.close(() => r()));
 });
-describe("three-screen browser control plane (simulated chain)", () => {
-  it("Screen A renders accessible fields and all allowed profiles", async () => {
+describe("control-plane browser UI (simulated chain)", () => {
+  it("Services renders and service creation exposes accessible provider fields", async () => {
     expect(await page.title()).toContain("Setra402");
-    expect(await page.locator("#onboarding h1").textContent()).toBe(
-      "Register a service"
-    );
+    await page.click('[data-screen="onboarding"]');
+    await page.click('[data-testid="create-service"]');
+    expect(await page.locator("#onboarding h1").textContent()).toBe("Services");
     expect(await page.locator("#provider-profile option").count()).toBe(4);
     expect(await page.locator("#check-type option").count()).toBe(7);
   });
@@ -125,8 +140,10 @@ describe("three-screen browser control plane (simulated chain)", () => {
     expect(await page.inputValue("#service-capability")).toBe(
       "setra402.task.echo"
     );
+    await page.getByRole("button", { name: "Close dialog" }).click();
   });
   it("registers through Screen A and updates Screen B from the merged registry", async () => {
+    await page.click('[data-testid="create-service"]');
     await page.fill("#service-id", "browser-service");
     await page.fill("#service-name", "Browser service");
     await page.fill("#service-description", "Browser fixture");
@@ -151,15 +168,18 @@ describe("three-screen browser control plane (simulated chain)", () => {
     expect(await page.locator("#services-table").textContent()).toContain(hash);
   });
   it("Level 2 builder offers exactly the two additional adapters", async () => {
+    await page.click('[data-testid="create-service"]');
     await page.selectOption("#policy-level", "2");
     expect(await page.locator("#check-type option").count()).toBe(9);
     expect(await page.inputValue("#policy-json")).toContain("source_sampling");
     await page.selectOption("#check-type", "test_suite");
     await page.click("#add-check");
     expect(await page.inputValue("#policy-json")).toContain("test_bundle_hash");
+    await page.getByRole("button", { name: "Close dialog" }).click();
   });
   it("failed verification shows Pending and awaiting refund, never settled", async () => {
     await page.click('[data-screen="lifecycle"]');
+    await page.click("#run-protected-task");
     await page.click("#quote-task");
     await page.waitForFunction(
       () => document.getElementById("app-state")!.textContent === "QUOTED"
@@ -179,10 +199,16 @@ describe("three-screen browser control plane (simulated chain)", () => {
       "pending"
     );
     expect(await page.isDisabled("#refund-task")).toBe(true);
-  });
+  }, 15000);
   it("Screen C shows only the actual report checks", async () => {
     await page.click("#show-audit");
     expect(await page.locator("#verdict").textContent()).toBe("FAIL");
+    expect(await page.locator(".timeline").textContent()).toContain(
+      "Task created"
+    );
+    expect(await page.locator(".timeline").textContent()).toContain(
+      "Verification failed"
+    );
     expect(await page.locator(".check-row").count()).toBe(1);
     expect(await page.locator("#audit-checks").textContent()).toContain(
       "Simulated schema mismatch"
@@ -217,6 +243,9 @@ describe("three-screen browser control plane (simulated chain)", () => {
     "has no horizontal overflow at %s pixels",
     async (width) => {
       await page.setViewportSize({ width, height: 950 });
+      if (width <= 640) {
+        await page.getByRole("button", { name: "Open navigation" }).click();
+      }
       await page.click('[data-screen="onboarding"]');
       expect(
         await page.evaluate(
@@ -225,12 +254,42 @@ describe("three-screen browser control plane (simulated chain)", () => {
       ).toBe(true);
     }
   );
+  it("overview and developer tabs show real health and integration details", async () => {
+    await page.click('[data-screen="overview"]');
+    expect(await page.locator("#overview h1").textContent()).toBe("Overview");
+    expect(await page.locator(".operational-banner").textContent()).toContain(
+      "Setra402 operational"
+    );
+    expect(await page.locator(".metric-card").count()).toBe(3);
+    await page
+      .getByRole("button", { name: "REST / x402", exact: true })
+      .click();
+    expect(await page.locator(".endpoint-list").textContent()).toContain(
+      "/api/tasks/refund"
+    );
+    expect(await page.locator('[role="tab"]').count()).toBe(4);
+    await page.getByRole("tab", { name: "MCP" }).click();
+    expect(await page.locator(".tool-name-list").textContent()).toContain(
+      "discover_services"
+    );
+    await page.getByRole("tab", { name: "REST / x402" }).click();
+    expect(await page.locator(".endpoint-list").textContent()).toContain(
+      "/api/tasks/refund"
+    );
+    await page.getByRole("tab", { name: "Examples" }).click();
+    expect(await page.locator(".code-block").textContent()).toContain(
+      "x-setra-csrf"
+    );
+  });
   it("client assets contain no financial signing code or secret material", () => {
-    const source = ["index.html", "app.js", "styles.css"]
-      .map((f) =>
-        readFileSync(new URL(`../../../frontend/${f}`, import.meta.url), "utf8")
-      )
-      .join("\n");
+    const frontend = fileURLToPath(
+      new URL("../../../frontend/", import.meta.url)
+    );
+    const source = [
+      readFileSync(join(frontend, "index.html"), "utf8"),
+      ...readTree(join(frontend, "src")),
+      ...readTree(join(frontend, "dist")),
+    ].join("\n");
     expect(source).not.toMatch(
       /secretKey|fromSecretKey|BUYER_KEYPAIR|VERIFIER_KEYPAIR|MINT_SECRET|VOUCHER_SECRET|PROVIDER_API_SECRET|ONBOARDING_ADMIN_TOKEN|process\.env|localStorage|\.settlePublic\(|\.settlePrivate\(/
     );
@@ -240,6 +299,8 @@ describe("three-screen browser control plane (simulated chain)", () => {
   });
   it("runs without browser errors and supports keyboard focus", async () => {
     expect(browserErrors).toEqual([]);
+    await page.click('[data-screen="onboarding"]');
+    await page.click('[data-testid="create-service"]');
     await page.focus("#service-id");
     await page.keyboard.press("Tab");
     expect(await page.evaluate(() => document.activeElement?.id)).toBe(

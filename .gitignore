@@ -15,3 +15,27 @@ frontend/dist/
 seller-server/config/services.local.json
 seller-server/config/services.local.json.lock
 seller-server/config/services.local.json.*.tmp
+
+# Kiro specs and AI-generated documentation
+.kiro/
+
+# Documentation and markdown files
+*_README.md
+*_GUIDE.md
+*_AUDIT.md
+*_WALKTHROUGH.md
+*_REFERENCE.md
+*_SKILL.md
+*_TOKENS.md
+AUDIT_*.md
+LIVE_*.md
+RPC_*.md
+FRONTEND_*.md
+
+# Test results and artifacts
+vitest-results.json
+**/vitest-results.json
+
+# Temporary files
+nul
+*nul

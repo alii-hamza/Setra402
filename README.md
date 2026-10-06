@@ -71,6 +71,7 @@ Setra402 introduces trustless, confidential micro-commerce to Solana[cite: 4]:
 
 ## 🧪 Local Testing & Verification
 
+### Quick Test Suite
 ```bash
 # 1. Install dependencies
 yarn install
@@ -78,3 +79,17 @@ yarn install
 # 2. Run the 6/6 on-chain integration test suite
 anchor test --skip-build
 ```
+
+### Live On-Chain Audit
+```bash
+# Run comprehensive financial & privacy verification
+cd buyer-agent
+npx ts-node scripts/audit-live-chain.ts
+```
+
+**📄 Full audit documentation:** See [`AUDIT_README.md`](./AUDIT_README.md) for complete verification methodology, manual RPC inspection commands, and claims verification matrix.
+
+**Key audit documents:**
+- [`LIVE_CHAIN_FINANCIAL_AND_PRIVACY_AUDIT.md`](./LIVE_CHAIN_FINANCIAL_AND_PRIVACY_AUDIT.md) — Formal audit report (60 KB)
+- [`AUDIT_EXECUTION_GUIDE.md`](./AUDIT_EXECUTION_GUIDE.md) — Quick start guide
+- [`RPC_INSPECTION_REFERENCE.md`](./RPC_INSPECTION_REFERENCE.md) — Manual verification commands

@@ -107,13 +107,20 @@ describe("local development launcher", () => {
       docker: async () => true,
       seller: async () => false,
       portAvailable,
+      inspectPort: (port) => ({
+        pid: 54321,
+        processName: "other.exe",
+        ownership: "FOREIGN",
+        detail: `foreign process; not touched (PID 54321, other.exe)`,
+      }),
     });
 
     expect(result.ready).toBe(false);
     expect(result.checks).toContainEqual({
       name: "Control",
-      state: "UNAVAILABLE",
-      detail: "port 3003 is already in use",
+      state: "BLOCKED",
+      detail:
+        ":3003 — foreign process; not touched (PID 54321, other.exe). Stop or reconfigure the owning application yourself; dev:setra will not terminate it.",
     });
     expect(result.checks).toContainEqual({
       name: "Seller",
