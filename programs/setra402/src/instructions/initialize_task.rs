@@ -1,5 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+
 use crate::constants::*;
 use crate::errors::SetraError;
 use crate::state::*;
@@ -10,13 +11,23 @@ pub struct InitializeTask<'info> {
     #[account(mut)]
     pub buyer: Signer<'info>,
 
-    /// CHECK: Target seller pubkey recorded in task terms
+    /// CHECK: Seller pubkey recorded in task terms.
     pub seller: UncheckedAccount<'info>,
 
-    /// CHECK: Verifier authority authorized to trigger settlement
+    /// CHECK: Verifier authority recorded in task terms.
     pub verifier: UncheckedAccount<'info>,
 
     pub mint: Account<'info, Mint>,
+
+    #[account(
+        constraint = protocol_treasury.mint == mint.key(),
+        constraint = protocol_treasury.owner ==
+            Pubkey::find_program_address(
+                &[b"treasury_authority"],
+                &crate::ID
+            ).0 @ SetraError::InvalidTreasury
+    )]
+    pub protocol_treasury: Account<'info, TokenAccount>,
 
     #[account(
         init,
@@ -65,10 +76,12 @@ pub fn handler(
         .ok_or(SetraError::Overflow)?;
 
     let task_state = &mut ctx.accounts.task_state;
+
     task_state.buyer = ctx.accounts.buyer.key();
     task_state.seller = ctx.accounts.seller.key();
     task_state.verifier = ctx.accounts.verifier.key();
     task_state.mint = ctx.accounts.mint.key();
+    task_state.protocol_treasury = ctx.accounts.protocol_treasury.key();
     task_state.task_id = task_id;
     task_state.amount = amount;
     task_state.deadline_unix = deadline_unix;
@@ -76,13 +89,14 @@ pub fn handler(
     task_state.is_private = is_private;
     task_state.bump = ctx.bumps.task_state;
 
-    // Escrow transfer from buyer to vault
     let cpi_accounts = Transfer {
         from: ctx.accounts.buyer_token_account.to_account_info(),
         to: ctx.accounts.vault.to_account_info(),
         authority: ctx.accounts.buyer.to_account_info(),
     };
+
     let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
+
     token::transfer(cpi_ctx, amount)?;
 
     Ok(())

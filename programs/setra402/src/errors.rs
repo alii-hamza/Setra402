@@ -14,10 +14,14 @@ pub enum SetraError {
     TaskNotExpired,
     #[msg("Task deadline has already passed")]
     TaskExpired,
+    #[msg("Settlement instruction does not match task privacy mode")]
+    InvalidPrivacyMode,
     #[msg("Signer is not the designated verifier")]
     InvalidVerifier,
     #[msg("Nullifier has already been spent")]
     NullifierAlreadySpent,
+    #[msg("Treasury is not controlled by the protocol")]
+    InvalidTreasury,
     #[msg("Invalid Chaumian proof verification")]
     InvalidProof,
 }

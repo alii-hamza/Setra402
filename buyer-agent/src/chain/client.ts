@@ -493,6 +493,7 @@ export class ChainClient implements EscrowChain {
             taskState: input.taskState,
             vault: input.vault,
             buyerTokenAccount: input.buyerTokenAccount,
+            protocolTreasury: this.options.protocolTreasury,
             tokenProgram: TOKEN_PROGRAM_ID,
             systemProgram: SystemProgram.programId,
           })

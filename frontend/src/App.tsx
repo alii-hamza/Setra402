@@ -220,6 +220,9 @@ export default function App() {
   const [taskStatus, setTaskStatus] = useState<TaskStatus | null>(null);
   const [taskStateLabel, setTaskStateLabel] = useState("DISCOVERED");
   const [busy, setBusy] = useState(false);
+  const [workflowStage, setWorkflowStage] = useState("");
+  const [scenario, setScenario] = useState<"valid" | "invalid" | "custom">("valid");
+  const [advancedActions, setAdvancedActions] = useState(false);
 
   const selectedProfile = config?.providerProfiles.find(
     (profile) => profile.provider_id === draft.provider
@@ -260,7 +263,7 @@ export default function App() {
     setServiceId((previous) =>
       response.services.some((service) => service.id === previous)
         ? previous
-        : response.services[0]?.id ?? ""
+        : response.services.find((service) => service.id === "lead-scraper-demo")?.id ?? response.services[0]?.id ?? ""
     );
   }, []);
 
@@ -443,6 +446,59 @@ export default function App() {
     setTaskStateLabel("DISCOVERED");
     setCreatedAt(null);
     setActivityEvents([]);
+    setWorkflowStage("");
+    setTaskDialogOpen(false);
+  }
+
+  // The quote is reviewed separately; funding is the explicit user authorization.
+  // Never automatically retry an uncertain on-chain write.
+  async function authorizeAndExecute() {
+    if (busy || !activeCall || outcome?.status !== "payment_required") return;
+    const call = activeCall;
+    setBusy(true);
+    setTaskDialogOpen(false);
+    setScreen("lifecycle");
+    try {
+      setWorkflowStage("Funding escrow — please wait; do not repeat the transaction.");
+      setTaskStateLabel("FUNDING");
+      const funded = await fundTask(call);
+      setOutcome(funded);
+      addActivityEvent("Escrow funded", funded.funded?.initializeSignature);
+      if (funded.status !== "funded") {
+        setWorkflowStage("Funding needs review. Check task state before retrying.");
+        setTaskStateLabel("ACTION REQUIRED");
+        return;
+      }
+      const fundedStatus = await getTaskStatus(call);
+      setTaskStatus(fundedStatus);
+      setWorkflowStage("Executing provider request and verifying result…");
+      setTaskStateLabel("EXECUTING / VERIFYING");
+      addActivityEvent("Provider execution started");
+      const result = await executeTask(call);
+      setOutcome(result);
+      const status = await getTaskStatus(call);
+      setTaskStatus(status);
+      if (result.result?.resultHash) addActivityEvent("Result committed", result.result.resultHash);
+      if (result.report) addActivityEvent(result.report.passed ? "Verification passed" : "Verification failed", `Verification level ${result.report.level}`);
+      if (status.chainAction === "settled") addActivityEvent("Settlement confirmed");
+      if (status.chainAction === "refunded") addActivityEvent("Refund confirmed");
+      const labels: Record<string, string> = {
+        settled: "SETTLED", verification_failed: "FAILED", refunded: "REFUNDED",
+      };
+      setTaskStateLabel(labels[result.status] ?? result.status.toUpperCase());
+      setWorkflowStage(result.status === "settled"
+        ? "Verification passed. Escrow settlement submitted; inspect chain status below."
+        : result.status === "verification_failed"
+        ? "Verification rejected the result. Funds remain in escrow until the refund deadline."
+        : "Execution completed. Review the on-chain state below.");
+    } catch (error) {
+      setTaskStateLabel("ACTION REQUIRED");
+      setWorkflowStage("Request interrupted. Check on-chain task status before retrying; funding may already have succeeded.");
+      try { setTaskStatus(await getTaskStatus(call)); } catch { /* keep original error */ }
+      showNotice(errorMessage(error), true);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function runTaskAction(action: TaskAction) {
@@ -472,6 +528,8 @@ export default function App() {
           `Task ${call.task_id} · ${call.service_id}`
         );
         addActivityEvent("Quote committed");
+        setWorkflowStage("Quote prepared. Review the amount and authorize funding to continue.");
+        setTaskDialogOpen(false);
       }
       if (action === "fund") {
         addActivityEvent(
@@ -605,6 +663,7 @@ export default function App() {
     outcome?.status !== "payment_required";
   const runDisabled = busy || outcome?.status !== "funded";
   const refundDisabled = busy || taskStatus?.chainAction !== "refund_available";
+  const demoFixtureAvailable = selectedService?.id === "lead-scraper-demo";
 
   const lifecycleSteps = makeSteps(
     [
@@ -1042,7 +1101,7 @@ export default function App() {
           <div>
             <div className="eyebrow">PROTECTED EXECUTION</div>
             <h1 tabIndex={-1}>Tasks</h1>
-            <p>Track protected execution and inspect lifecycle state.</p>
+            <p>Run a verified task, follow each step, and inspect the on-chain outcome.</p>
           </div>
           <Button
             id="run-protected-task"
@@ -1055,6 +1114,27 @@ export default function App() {
             {activeCall ? "Continue protected task" : "Run protected task"}
           </Button>
         </div>
+        <div className="guided-hero">
+          <div>
+            <span className="guided-eyebrow">SETTLEMENT PROTECTED BY VERIFICATION</span>
+            <h2>{activeCall ? "Your protected execution" : "Test the protocol in minutes"}</h2>
+            <p>{activeCall ? (workflowStage || "Quote prepared. Review your payment and continue.") : "Choose a demo scenario, review the quote, and run. No protocol expertise required."}</p>
+            {activeCall && <div className="guided-progress" role="status" aria-live="polite"><span className={busy ? "guided-pulse" : ""} />{taskStateLabel} · {activeCall.service_id}</div>}
+          </div>
+          <Button className="primary-button" disabled={busy} onClick={() => setTaskDialogOpen(true)}>
+            {activeCall ? "View task controls" : "Start guided demo →"}
+          </Button>
+        </div>
+        {activeCall && outcome?.status === "payment_required" && (
+          <Card className="guided-payment">
+            <div><strong>Quote ready — authorize escrow</strong><p>Service: {activeCall.service_id} · Amount: {String(quote?.amount ?? selectedService?.price_base_units ?? "—")} base units · Network: configured Solana cluster</p><p>Funding is a real on-chain action. After authorization, execution and verification run automatically.</p></div>
+            <Button className="primary-button" disabled={busy || !config?.writeEnabled} onClick={() => void authorizeAndExecute()}>Authorize funding &amp; execute →</Button>
+          </Card>
+        )}
+        {activeCall && outcome?.status === "verification_failed" && (
+          <Card className="guided-failure"><strong>Verification blocked settlement</strong><p>The result did not meet the service policy. Escrow can be refunded after the on-chain deadline.</p><p>{taskStatus?.chainAction === "refund_available" ? "Refund is available now." : "Waiting for refund eligibility; the status updates automatically."}</p></Card>
+        )}
+        <Disclosure title="Task history and protocol data">
         <Card className="task-table-card">
           <div className="section-title-row">
             <h2>Task activity</h2>
@@ -1112,6 +1192,7 @@ export default function App() {
             </div>
           )}
         </Card>
+        </Disclosure>
         <div className="task-detail-layout">
           <Card variant="emphasized">
             <div className="section-title-row">
@@ -1228,10 +1309,13 @@ export default function App() {
           onClose={() => setTaskDialogOpen(false)}
         >
           <Card className="task-configuration">
-            <p className="hint">
-              Configure the request that will be sent to the existing
-              control-plane.
-            </p>
+            <p className="hint">Pick a service and test scenario. First prepare a quote; then authorize the exact escrow amount from the Tasks page.</p>
+            <div className="guided-scenarios" aria-label="Test scenario">
+              <button type="button" className={scenario === "valid" ? "chosen" : ""} disabled={Boolean(activeCall)} onClick={() => { setScenario("valid"); setTaskInput('{"fixture":"valid"}'); if (availableServices.some(s => s.id === "lead-scraper-demo")) setServiceId("lead-scraper-demo"); }}><strong>✓ Successful demo</strong><span>Valid fixture · expected settlement</span></button>
+              <button type="button" className={scenario === "invalid" ? "chosen" : ""} disabled={Boolean(activeCall)} onClick={() => { setScenario("invalid"); setTaskInput('{"fixture":"invalid"}'); if (availableServices.some(s => s.id === "lead-scraper-demo")) setServiceId("lead-scraper-demo"); }}><strong>✕ Failure demo</strong><span>Invalid fixture · expected refund path</span></button>
+              <button type="button" className={scenario === "custom" ? "chosen" : ""} disabled={Boolean(activeCall)} onClick={() => setScenario("custom")}><strong>⌘ Custom request</strong><span>Provide your own JSON</span></button>
+            </div>
+            <p className="hint">Demo fixtures are supported by <strong>lead-scraper-demo</strong>, not every service. These are deterministic test inputs, not real lead records.</p>
             <div className="form-grid">
               <label>
                 Transport
@@ -1295,7 +1379,7 @@ export default function App() {
                   spellCheck={false}
                   value={taskInput}
                   disabled={Boolean(activeCall)}
-                  onChange={(event) => setTaskInput(event.target.value)}
+                  onChange={(event) => { setTaskInput(event.target.value); setScenario("custom"); }}
                 />
               </label>
             </div>
@@ -1304,30 +1388,33 @@ export default function App() {
                 ? `${selectedService.price_base_units} base units · ${selectedService.timeout_seconds}s · Level ${selectedService.verification_policy.level} · ${selectedService.provider_connector_ref}`
                 : "No services available for this transport."}
             </div>
+            {scenario !== "custom" && !demoFixtureAvailable && <p className="guided-warning">Select lead-scraper-demo to use the preset fixture, or switch to Custom request.</p>}
             <div className="actions">
               <Button
                 id="quote-task"
                 className="primary-button"
-                disabled={quoteDisabled || !serviceId}
+                disabled={quoteDisabled || !serviceId || (scenario !== "custom" && !demoFixtureAvailable)}
                 onClick={() => void runTaskAction("quote")}
               >
-                Get quote
+                {activeCall ? "Quote prepared ✓" : "Prepare payment quote →"}
               </Button>
-              <Button
+              {activeCall && outcome?.status === "payment_required" && <Button className="primary-button" disabled={busy || !config?.writeEnabled} onClick={() => void authorizeAndExecute()}>Authorize &amp; execute →</Button>}
+              {advancedActions && <Button
                 id="fund-task"
                 disabled={fundDisabled}
                 onClick={() => void runTaskAction("fund")}
               >
-                Fund escrow
-              </Button>
-              <Button
+                Fund escrow (manual)
+              </Button>}
+              {advancedActions && <Button
                 id="run-task"
                 disabled={runDisabled}
                 onClick={() => void runTaskAction("run")}
               >
-                Execute &amp; verify
-              </Button>
+                Execute &amp; verify (manual)
+              </Button>}
             </div>
+            <button type="button" className="guided-advanced-toggle" onClick={() => setAdvancedActions(v => !v)}>{advancedActions ? "Hide" : "Show"} advanced manual protocol actions</button>
             <Button
               id="refund-task-dialog"
               className="secondary"

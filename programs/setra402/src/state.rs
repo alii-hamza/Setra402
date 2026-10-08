@@ -26,6 +26,7 @@ pub struct TaskState {
     pub seller: Pubkey,
     pub verifier: Pubkey,
     pub mint: Pubkey,
+    pub protocol_treasury: Pubkey,
     pub task_id: u64,
     pub amount: u64,
     pub deadline_unix: i64,

@@ -17,7 +17,11 @@ async fn main() {
         .unwrap_or_else(|e| panic!("could not bind to {bind_addr}: {e}"));
 
     println!("seller-server listening on {bind_addr}");
-    println!("RPC endpoint: {}:{}", std::env::var("RPC_HOST").unwrap_or_else(|_| "127.0.0.1".into()), std::env::var("RPC_PORT").unwrap_or_else(|_| "8899".into()));
+    println!(
+        "RPC endpoint: {}:{}",
+        std::env::var("RPC_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
+        std::env::var("RPC_PORT").unwrap_or_else(|_| "8899".into())
+    );
 
     axum::serve(listener, build_router(state))
         .await

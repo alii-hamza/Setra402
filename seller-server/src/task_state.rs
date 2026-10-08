@@ -7,8 +7,7 @@
 - Ensures type consistency
 - Provides serialization guarantees                      */
 
-
-pub use task_anchor_types::{TaskState, TaskStatus, NullifierRecord};
+pub use task_anchor_types::{NullifierRecord, TaskState, TaskStatus};
 
 // PDA seeds that aren't in the shared crate
 pub const TASK_SEED: &[u8] = b"task";
@@ -21,7 +20,7 @@ use borsh::de::BorshDeserialize;
 pub fn try_from_account_data(data: &[u8]) -> Result<TaskState, DecodeError> {
     // Skip 8-byte Anchor discriminator
     let body = data.get(8..).ok_or(DecodeError::TooShort)?;
-    
+
     // Use shared crate's AnchorDeserialize (BorshDeserialize)
     TaskState::try_from_slice(body).map_err(|_| DecodeError::Corrupt)
 }

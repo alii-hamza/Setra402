@@ -3,7 +3,7 @@
 //! address is re-derived here from `(program_id, buyer, task_id)`, never
 //! read off an incoming request.
 
-use crate::task_state::{TASK_SEED, VAULT_SEED, NULLIFIER_SEED};
+use crate::task_state::{NULLIFIER_SEED, TASK_SEED, VAULT_SEED};
 use solana_pubkey::Pubkey;
 
 pub fn task_state_pda(program_id: &Pubkey, buyer: &Pubkey, task_id: u64) -> (Pubkey, u8) {

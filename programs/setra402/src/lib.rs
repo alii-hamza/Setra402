@@ -7,7 +7,7 @@ pub mod state;
 
 pub use instructions::*;
 
-declare_id!("FUjN9K7C5yHr5NhVrJ7WCgifgDiBJnSDDGQjnNkUDBMN");
+declare_id!("DHyQV6Khe42Papqad63dqkMHxqiKAUMcE4bugiHpZYtb");
 
 #[program]
 pub mod setra402 {
@@ -27,10 +27,7 @@ pub mod setra402 {
         instructions::settle_task::handler(ctx)
     }
 
-    pub fn settle_task_private(
-        ctx: Context<SettleTaskPrivate>,
-        nullifier: [u8; 32],
-    ) -> Result<()> {
+    pub fn settle_task_private(ctx: Context<SettleTaskPrivate>, nullifier: [u8; 32]) -> Result<()> {
         instructions::settle_task_private::handler(ctx, nullifier)
     }
 

@@ -1,8 +1,8 @@
-use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use crate::constants::*;
 use crate::errors::SetraError;
 use crate::state::*;
+use anchor_lang::prelude::*;
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 #[derive(Accounts)]
 #[instruction(nullifier: [u8; 32])]
@@ -30,14 +30,24 @@ pub struct SettleTaskPrivate<'info> {
     #[account(
         mut,
         seeds = [VAULT_SEED, task_state.key().as_ref()],
-        bump
+        bump,
+        constraint = vault.mint == task_state.mint,
+        constraint = vault.owner == task_state.key()
     )]
     pub vault: Account<'info, TokenAccount>,
 
-    #[account(mut, constraint = seller_token_account.owner == task_state.seller)]
+    #[account(
+        mut,
+        constraint = seller_token_account.owner == task_state.seller,
+        constraint = seller_token_account.mint == task_state.mint
+    )]
     pub seller_token_account: Account<'info, TokenAccount>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        address = task_state.protocol_treasury,
+        constraint = protocol_treasury.mint == task_state.mint
+    )]
     pub protocol_treasury: Account<'info, TokenAccount>,
 
     pub token_program: Program<'info, Token>,
@@ -46,11 +56,19 @@ pub struct SettleTaskPrivate<'info> {
 
 pub fn handler(ctx: Context<SettleTaskPrivate>, nullifier: [u8; 32]) -> Result<()> {
     let task_state = &mut ctx.accounts.task_state;
-    require!(task_state.status == TaskStatus::Pending, SetraError::TaskNotPending);
+    require!(
+        task_state.status == TaskStatus::Pending,
+        SetraError::TaskNotPending
+    );
+
+    require!(task_state.is_private, SetraError::InvalidPrivacyMode);
 
     // Verify clock expiry has not passed
     let clock = Clock::get()?;
-    require!(clock.unix_timestamp <= task_state.deadline_unix, SetraError::TaskExpired);
+    require!(
+        clock.unix_timestamp < task_state.deadline_unix,
+        SetraError::TaskExpired
+    );
 
     let amount = task_state.amount;
     let fee = (amount as u128)
@@ -64,12 +82,7 @@ pub fn handler(ctx: Context<SettleTaskPrivate>, nullifier: [u8; 32]) -> Result<(
     let buyer_key = task_state.buyer;
     let task_id_bytes = task_state.task_id.to_le_bytes();
     let bump = [task_state.bump];
-    let signer_seeds: &[&[&[u8]]] = &[&[
-        TASK_SEED,
-        buyer_key.as_ref(),
-        &task_id_bytes,
-        &bump,
-    ]];
+    let signer_seeds: &[&[&[u8]]] = &[&[TASK_SEED, buyer_key.as_ref(), &task_id_bytes, &bump]];
 
     // 99% payout to Seller
     let cpi_to_seller = Transfer {

@@ -8,6 +8,7 @@ export interface CreateTaskParams {
   seller: PublicKey;
   verifier: PublicKey;
   mint: PublicKey;
+  protocolTreasury: PublicKey;
   buyerTokenAccount: PublicKey;
   taskId: bigint;
   amount: number | bigint;
@@ -25,6 +26,7 @@ export class SetraClient {
   public getTaskPda(buyer: PublicKey, taskId: bigint): [PublicKey, number] {
     const idBuffer = Buffer.alloc(8);
     idBuffer.writeBigUInt64LE(taskId);
+
     return PublicKey.findProgramAddressSync(
       [Buffer.from("task"), buyer.toBuffer(), idBuffer],
       this.program.programId
@@ -38,7 +40,9 @@ export class SetraClient {
     );
   }
 
-  public getNullifierPda(nullifier: Buffer | Uint8Array): [PublicKey, number] {
+  public getNullifierPda(
+    nullifier: Buffer | Uint8Array
+  ): [PublicKey, number] {
     return PublicKey.findProgramAddressSync(
       [Buffer.from("nullifier"), Buffer.from(nullifier)],
       this.program.programId
@@ -46,7 +50,11 @@ export class SetraClient {
   }
 
   public async createTask(params: CreateTaskParams): Promise<string> {
-    const [taskState] = this.getTaskPda(params.buyer.publicKey, params.taskId);
+    const [taskState] = this.getTaskPda(
+      params.buyer.publicKey,
+      params.taskId
+    );
+
     const [vault] = this.getVaultPda(taskState);
 
     return await this.program.methods
@@ -61,6 +69,7 @@ export class SetraClient {
         seller: params.seller,
         verifier: params.verifier,
         mint: params.mint,
+        protocolTreasury: params.protocolTreasury,
         taskState,
         vault,
         buyerTokenAccount: params.buyerTokenAccount,

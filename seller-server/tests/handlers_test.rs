@@ -823,6 +823,7 @@ fn encode_task_state(
         seller: Pubkey::new_unique(),
         verifier: Pubkey::new_unique(),
         mint: *mint,
+        protocol_treasury: Pubkey::new_unique(),
         task_id: TASK_ID,
         amount,
         deadline_unix,
