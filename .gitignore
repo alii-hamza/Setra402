@@ -10,11 +10,20 @@ PHASE3_MINT_INTEGRATION.md
 ROLE_B_HANDOVER.md
 SELLER_SERVER_INTEGRATION.md
 .setra-state/
+.localnet/
 buyer-agent/dist/
 frontend/dist/
 seller-server/config/services.local.json
 seller-server/config/services.local.json.lock
 seller-server/config/services.local.json.*.tmp
+
+# Environment variable overrides only (default .env files are tracked)
+.env.local
+.env.*.local
+frontend/.env.local
+
+# Keep IDL in repo (copied from target/idl during build)
+!idl/
 
 # Kiro specs and AI-generated documentation
 .kiro/

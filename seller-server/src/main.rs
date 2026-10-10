@@ -2,6 +2,7 @@ use seller_server::{build_router, config::AppState};
 
 #[tokio::main]
 async fn main() {
+    dotenv::dotenv().ok();
     let state = match AppState::from_env() {
         Ok(state) => state,
         Err(e) => {

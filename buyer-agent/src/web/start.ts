@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import { config } from "dotenv";
 import { createRuntime } from "../core/runtime.js";
 import { ServiceRegistry } from "../registry/services.js";
 import { createControlPlane } from "./server.js";
@@ -13,6 +14,10 @@ import {
   defaultHealthProbes,
   inspectOperatorHealth,
 } from "../core/operator-health.js";
+
+// Load environment variables from .env file
+config();
+
 const settings = loadControlPlaneSettings(
   process.env,
   fileURLToPath(
@@ -26,6 +31,7 @@ const mcpUrl = `http://127.0.0.1:${settings.mcpPort}/mcp`;
 const runtimeSettings = loadRuntimeSettings({
   ...process.env,
   MCP_URL: mcpUrl,
+  SELLER_URL: process.env.SELLER_URL || "http://127.0.0.1:3000",
 });
 const runtime = createRuntime({
   settings: runtimeSettings,

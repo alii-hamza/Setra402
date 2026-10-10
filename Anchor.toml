@@ -5,8 +5,11 @@ package_manager = "yarn"
 resolution = true
 skip-lint = false
 
+[programs.devnet]
+setra402 = "DHyQV6Khe42Papqad63dqkMHxqiKAUMcE4bugiHpZYtb"
+
 [programs.localnet]
-setra402 = "FUjN9K7C5yHr5NhVrJ7WCgifgDiBJnSDDGQjnNkUDBMN"
+setra402 = "5hMcAceh1ZJQxkHPsBExzFQq97Gie18S9kHFZh8Sk9Jq"
 
 [registry]
 url = "https://api.apr.dev"
@@ -22,6 +25,3 @@ test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""
 startup_wait = 20000
 shutdown_wait = 2000
 upgradeable = false
-
-[programs.devnet]
-setra402 = "DHyQV6Khe42Papqad63dqkMHxqiKAUMcE4bugiHpZYtb"

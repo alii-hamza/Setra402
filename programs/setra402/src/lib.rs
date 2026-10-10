@@ -7,7 +7,7 @@ pub mod state;
 
 pub use instructions::*;
 
-declare_id!("DHyQV6Khe42Papqad63dqkMHxqiKAUMcE4bugiHpZYtb");
+declare_id!("5hMcAceh1ZJQxkHPsBExzFQq97Gie18S9kHFZh8Sk9Jq");
 
 #[program]
 pub mod setra402 {
